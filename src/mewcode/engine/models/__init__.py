@@ -1,7 +1,7 @@
 """Engine models - Data classes and abstract base classes"""
 
 from .client import LLMClient
-from .message import LLMResponse, Message, MessageRole, StreamChunk, TokenUsage
+from .message import LLMResponse, Message, MessageRole, StreamChunk, ToolCall, TokenUsage
 
 __all__ = [
     "LLMClient",
@@ -9,5 +9,6 @@ __all__ = [
     "Message",
     "MessageRole",
     "StreamChunk",
+    "ToolCall",
     "TokenUsage",
 ]

@@ -89,10 +89,36 @@ Tests use pytest with `asyncio_mode = "auto"` (configured in `pyproject.toml`). 
 
 ## Development Workflow
 
-Per `AGENTS.md`, the project uses a three-document spec-driven workflow:
+**HARD RULE — 强制流程：** 对本项目的任何修改（新增功能、修改模块、修复 Bug、调整配置、重构代码、修改文档结构等），都必须先调用 `mew-spec` skill,按其规定的四阶段流程执行：
+
+```
+spec.md（做什么）→ plan.md（怎么做）→ task.md（按什么顺序做）→ checklist.md（做对了没）
+```
+
+**触发条件（满足任意一条就必须调用 mew-spec）：**
+- 用户要求「修改」「新增」「实现」「重构」「优化」「修复」项目中的任何代码或文档
+- 用户提出一个新功能、新模块、新章节
+- 用户描述一个想法,即使看起来很小很简单
+- 用户说「帮我做 X」「加一个 Y」「改一下 Z」
+
+**禁止行为：**
+- 在四份文档（spec.md / plan.md / task.md / checklist.md）全部生成并通过用户审批之前,禁止编写任何实现代码
+- 禁止以「这个太简单」「这个很明显」「直接改一行就行」为理由跳过流程
+- 禁止合并步骤、跳过审批、自由发挥
+- 禁止在没有获得用户对当前阶段文档的明确批准时,推进到下一阶段
+
+**唯一例外：** 纯查询/解释/阅读操作(例如「这段代码是什么意思」「这个函数在哪里」「跑一下测试看看」)不触发流程。一旦涉及修改文件,立即进入流程。
+
+**调用方式：** 每次新会话首次出现修改类需求时,主动调用 `mew-spec` skill,然后严格遵循其指引(一次问一个问题、逐段呈现、逐阶段审批、先有证据再下结论)。
+
+---
+
+### 文档约定
+
 - **spec.md**: Product spec (what/why, no implementation details)
-- **tasks.md**: Task breakdown with file impacts and dependencies
-- **checklist.md**: Observable acceptance criteria per task
+- **plan.md**: Architecture, interfaces, data structures, technical decisions
+- **task.md**: Task breakdown with file impacts, steps, and verification
+- **checklist.md**: Observable acceptance criteria
 - **CHANGELOG.md**: Version history with code change descriptions (written for coding agents)
 
-When adding features, update all three documents and CHANGELOG.md alongside code changes.
+完成开发和验收后,同步更新 CHANGELOG.md。

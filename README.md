@@ -10,6 +10,8 @@ MewCode 是一个轻量级的终端 AI 编程助手，支持多种大语言模�
 
 - 🤖 **多模型支持** - OpenAI、Claude、Ollama、自定义端点
 - ⚡ **流式对话** - 实时显示 AI 回复
+- 🛠️ **工具调用** - 6 个内置工具(ReadFile / WriteFile / EditFile / Bash / Glob / Grep),让模型可以读写文件、执行命令、检索代码
+- 🔌 **双协议适配** - 同时支持 OpenAI tool_calls 与 Anthropic content blocks 两种 Function Calling 协议
 - 📝 **Markdown 渲染** - 支持代码高亮、标题、列表等格式
 - 💾 **会话持久化** - YAML 格式保存对话历史
 - 🎯 **命令补全** - Tab 补全内置命令
@@ -107,12 +109,53 @@ LLM 客户端和对话管理的核心模块。
 - `Conversation` - 单个对话
 - `ConversationManager` - 对话管理器，支持会话持久化
 
-#### 3. 工具层 (Tools) - 待实现
+#### 3. 工具层 (Tools)
 
-- 文件读写工具
-- 命令执行工具
-- 代码搜索工具
-- Git 操作工具
+工具子系统让模型从「只能动嘴」升级到「能动手」。模型在对话中可以请求工具,本地执行,把结果回灌让模型基于真实数据继续回答。
+
+**核心抽象** (`engine/tools/`)
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| `Tool` 抽象基类 | `base.py` | 工具接口:name / description / input_schema / category / 元信息 / validate_input / execute |
+| `ToolResult` | `base.py` | 工具返回值,is_error 区分成功/可恢复错误 |
+| `ToolContext` | `base.py` | 启动时锁定的运行上下文(working_dir / OS / shell) |
+| `ToolError` | `base.py` | 系统级错误标记(可恢复错误不抛此异常) |
+| `ToolRegistry` | `registry.py` | 注册中心 + 双协议格式输出 + 调度执行 + 错误兜底 |
+| `build_system_prompt` | `system_prompt.py` | 构造英文 system prompt(cwd / OS / 工具使用原则) |
+
+**6 个内置工具**
+
+| 工具 | 分类 | 只读 | 描述 |
+|------|------|------|------|
+| `ReadFile` | file | ✓ | 读文件(带行号),支持 offset/limit 分段,拒绝二进制 |
+| `WriteFile` | file | ✗ | 写文件,自动创建父目录,覆盖已存在 |
+| `EditFile` | file | ✗ | 局部替换,要求 old_string 在文件中唯一匹配 |
+| `Bash` | shell | ✗ | 执行 shell 命令(默认 30s 超时,输出截断) |
+| `Glob` | search | ✓ | 按 glob 找文件,排除噪音目录,按 mtime 倒序 |
+| `Grep` | search | ✓ | 正则搜内容,跳过二进制,支持 include / 上下文行 |
+
+**单步对话流程**(本章覆盖范围,后续章节会接 Agent Loop 多步循环)
+
+```
+用户输入 → LLM(第一次) → 模型请求工具 → 本地执行 → 结果回灌 → LLM(第二次) → 最终中文回复
+                                          ↓
+                                  TUI 展示 → ✓/✗ 轨迹
+```
+
+**协议适配**(在 Adapter 内部完成翻译,上层不感知协议差异)
+
+- **OpenAI 协议族**(CustomAdapter / OpenAIAdapter / OllamaAdapter):`tool_calls` + `role:tool`
+- **Anthropic 协议**(ClaudeAdapter):`tool_use` / `tool_result` content blocks
+
+**配置**(`config.yaml`)
+
+```yaml
+tools:
+  enabled: "all"        # "all" | "readonly" | [ReadFile, Glob, Grep, ...]
+  bash_timeout: 30
+  max_output_chars: 10000
+```
 
 #### 4. 记忆层 (Memory) - 待实现
 
@@ -152,18 +195,39 @@ mewcode/
 │       │   │   └── message.py  # 消息数据模型
 │       │   └── adapters/
 │       │       ├── factory.py  # 适配器工厂
+│       │       ├── _openai_protocol.py  # OpenAI tool_calls 翻译/聚合的共享 helper
 │       │       ├── openai_adapter.py
 │       │       ├── claude_adapter.py
 │       │       ├── ollama_adapter.py
 │       │       └── custom_adapter.py
+│       ├── engine/tools/         # 工具子系统(02-tools 章节)
+│       │   ├── base.py           # Tool/ToolResult/ToolContext/ToolError
+│       │   ├── registry.py       # ToolRegistry
+│       │   ├── system_prompt.py  # 英文 system prompt 构造
+│       │   ├── read_file.py
+│       │   ├── write_file.py
+│       │   ├── edit_file.py
+│       │   ├── bash.py
+│       │   ├── glob.py
+│       │   └── grep.py
 │       └── tui/
-│           ├── app.py          # TUI 主应用
+│           ├── app.py          # TUI 主应用(单步工具调用流程)
 │           └── widgets/
-│               ├── chat_area.py
+│               ├── chat_area.py    # 含工具调用轨迹渲染
 │               ├── input_box.py
 │               └── status_bar.py
+├── specs/                      # 章节化规格文档
+│   └── 02-tools/               # 工具系统(单步)
+│       ├── spec.md             # 需求(F/N/AC)
+│       ├── plan.md             # 架构设计与决策
+│       ├── task.md             # 任务拆解与依赖图
+│       └── checklist.md        # 验收清单
 └── tests/
-    └── test_e2e.py
+    ├── test_e2e.py
+    ├── test_message_tool_calls.py
+    ├── test_adapter_tool_calls.py
+    ├── test_adapter_anthropic_tool_use.py
+    └── test_tools_*.py          # 8 个工具单测文件
 ```
 
 ---
@@ -242,8 +306,18 @@ llm:
 
 ## 版本历史
 
+- **v0.1** - 工具系统(单步)
+  - 6 个内置工具:ReadFile / WriteFile / EditFile / Bash / Glob / Grep
+  - 同时支持 OpenAI tool_calls 与 Anthropic content blocks 协议
+  - 流式 tool_calls / tool_use 增量聚合
+  - 单步工具调用流程:模型请求 → 本地执行 → 结果回灌 → 最终回复
+  - TUI 工具调用轨迹展示(`→` `✓` `✗` 三态)
+  - `config.yaml` 工具开关(all / readonly / 显式列表)
+  - 工具子系统全英文输入输出,面向用户的 TUI 文案中文
+  - 单元测试覆盖工具、协议翻译、流式聚合(总 133 case)
+
 - **v0.0** - 初始版本
-  - 多 LLM 支持（OpenAI、Claude、Ollama、自定义端点）
+  - 多 LLM 支持(OpenAI、Claude、Ollama、自定义端点)
   - 流式对话
   - Markdown 渲染
   - 会话持久化

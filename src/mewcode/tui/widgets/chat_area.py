@@ -1,5 +1,6 @@
 """Chat area widget for displaying conversation"""
 
+import uuid
 from datetime import datetime
 
 from rich.console import Console
@@ -28,7 +29,10 @@ class ChatArea(Widget):
         self._stream_buffer = ""
         self._is_streaming = False
         self._messages = []  # 存储所有消息
-        self._stream_widget_id = "__streaming__"
+        # 流式占位 widget 的 ID 每次都重新生成,避免本章「第一次 stream
+        # → 工具 → 第二次 stream」时,上一轮的 remove() 还没异步完成,
+        # 新一轮 mount 撞同 ID 报「widget already exists」。
+        self._stream_widget_id: str | None = None
 
     def compose(self):
         """Compose the chat area"""
@@ -60,9 +64,11 @@ class ChatArea(Widget):
         self._scroll_to_bottom()
 
     def add_assistant_message_start(self) -> None:
-        """开始 AI 消息（流式输出前调用）"""
+        """开始 AI 消息(流式输出前调用)"""
         self._stream_buffer = ""
         self._is_streaming = True
+        # 每次开新流都用全新的 ID
+        self._stream_widget_id = f"streaming-{uuid.uuid4().hex[:12]}"
         header = Text()
         header.append("[...] ", style="dim")
         header.append("MewCode: ", style="bold blue")
@@ -71,8 +77,10 @@ class ChatArea(Widget):
         self._scroll_to_bottom()
 
     def add_stream_chunk(self, chunk: str) -> None:
-        """添加流式响应块，实时更新流式控件"""
+        """添加流式响应块,实时更新流式控件"""
         self._stream_buffer += chunk
+        if not self._stream_widget_id:
+            return
         try:
             stream_widget = self.query_one(f"#{self._stream_widget_id}", Static)
             stream_widget.update(self._build_assistant_text("[...]", self._stream_buffer))
@@ -81,9 +89,9 @@ class ChatArea(Widget):
         self._scroll_to_bottom()
 
     def add_assistant_message_end(self) -> None:
-        """结束 AI 消息（流式输出后调用）
-        移除流式期间反复 update() 的控件，替换为全新的 Static。
-        新控件从未被 update() 过，文本选择可正常工作。
+        """结束 AI 消息(流式输出后调用)
+        移除流式期间反复 update() 的控件,替换为全新的 Static。
+        新控件从未被 update() 过,文本选择可正常工作。
         """
         timestamp = datetime.now().strftime("%H:%M:%S")
         content = self._stream_buffer
@@ -95,14 +103,18 @@ class ChatArea(Widget):
         self._is_streaming = False
         self._stream_buffer = ""
 
-        # 移除流式控件
-        try:
-            stream_widget = self.query_one(f"#{self._stream_widget_id}", Static)
-            stream_widget.remove()
-        except Exception:
-            pass
+        # 移除流式控件(remove 是异步的;ID 即将被丢弃,新一轮会用新 ID,
+        # 不会发生 ID 冲突)
+        old_id = self._stream_widget_id
+        self._stream_widget_id = None
+        if old_id:
+            try:
+                stream_widget = self.query_one(f"#{old_id}", Static)
+                stream_widget.remove()
+            except Exception:
+                pass
 
-        # 全新 Static，从未被 update()，支持文本选择
+        # 全新 Static,从未被 update(),支持文本选择
         text = self._build_assistant_text(timestamp, content)
         new_widget = Static(text, classes="chat-msg assistant-msg")
         self._get_scroll_container().mount(new_widget)
@@ -129,6 +141,55 @@ class ChatArea(Widget):
         self._get_scroll_container().mount(widget)
         self._scroll_to_bottom()
 
+    # ------------------------------------------------------------------
+    # Tool-call trace (chapter 02-tools)
+    # ------------------------------------------------------------------
+
+    def add_tool_call(self, tool_name: str, params_summary: str) -> str:
+        """添加一行工具调用占位:`→ tool_name(summary)`,返回 widget id 用于 update。"""
+        widget_id = f"tool-{uuid.uuid4().hex[:12]}"
+        text = Text()
+        text.append("→ ", style="bold cyan")
+        text.append(f"{tool_name}", style="bold cyan")
+        text.append(f"({params_summary})", style="dim cyan")
+        widget = Static(text, id=widget_id, classes="chat-msg tool-msg")
+        # 把 tool_name + params 存在控件实例上,update 时复用
+        widget._mew_tool_name = tool_name  # type: ignore[attr-defined]
+        widget._mew_tool_params = params_summary  # type: ignore[attr-defined]
+        self._get_scroll_container().mount(widget)
+        self._scroll_to_bottom()
+        return widget_id
+
+    def update_tool_call_result(
+        self, widget_id: str, success: bool, summary: str
+    ) -> None:
+        """把对应的 tool 行更新为 ✓ / ✗ 形态。"""
+        try:
+            w = self.query_one(f"#{widget_id}", Static)
+        except Exception:
+            return
+        tool_name = getattr(w, "_mew_tool_name", "tool")
+        params = getattr(w, "_mew_tool_params", "")
+
+        text = Text()
+        if success:
+            text.append("✓ ", style="bold green")
+            text.append(f"{tool_name}", style="bold green")
+            text.append(f"({params})", style="dim green")
+            if summary:
+                text.append(f": {summary}", style="dim")
+        else:
+            text.append("✗ ", style="bold red")
+            text.append(f"{tool_name}", style="bold red")
+            text.append(f"({params})", style="dim red")
+            if summary:
+                text.append(f": {summary}", style="red")
+        try:
+            w.update(text)
+        except Exception:
+            pass
+        self._scroll_to_bottom()
+
     def _scroll_to_bottom(self) -> None:
         """滚动到底部"""
         try:
@@ -143,3 +204,5 @@ class ChatArea(Widget):
         container.remove_children()
         self._messages = []
         self._stream_buffer = ""
+        self._is_streaming = False
+        self._stream_widget_id = None

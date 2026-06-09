@@ -6,7 +6,8 @@ from typing import AsyncIterator, Optional
 import httpx
 
 from ..models.client import LLMClient
-from ..models.message import LLMResponse, Message, MessageRole, StreamChunk, TokenUsage
+from ..models.message import LLMResponse, Message, MessageRole, StreamChunk, ToolCall, TokenUsage
+from ._openai_protocol import OpenAIToolCallAggregator, convert_messages_to_openai
 
 
 class CustomAdapter(LLMClient):
@@ -41,23 +42,27 @@ class CustomAdapter(LLMClient):
         )
 
     def _convert_messages(self, messages: list[Message]) -> list[dict]:
-        """转换消息格式"""
-        result = []
-        for msg in messages:
-            result.append({
-                "role": msg.role.value,
-                "content": msg.content,
-            })
-        return result
+        """转换消息格式 — OpenAI 兼容,带 tool_calls / role:tool 支持"""
+        return convert_messages_to_openai(messages)
 
-    async def chat(self, messages: list[Message], **kwargs) -> LLMResponse:
-        """发送对话请求（非流式）"""
+    async def chat(
+        self,
+        messages: list[Message],
+        tools: Optional[list[dict]] = None,
+        **kwargs,
+    ) -> LLMResponse:
+        """发送对话请求(非流式)"""
         if self.api_format == "openai":
-            return await self._chat_openai_format(messages, **kwargs)
+            return await self._chat_openai_format(messages, tools=tools, **kwargs)
         else:
             return await self._chat_generic_format(messages, **kwargs)
 
-    async def _chat_openai_format(self, messages: list[Message], **kwargs) -> LLMResponse:
+    async def _chat_openai_format(
+        self,
+        messages: list[Message],
+        tools: Optional[list[dict]] = None,
+        **kwargs,
+    ) -> LLMResponse:
         """OpenAI 兼容格式请求"""
         payload = {
             "model": self.model,
@@ -65,6 +70,8 @@ class CustomAdapter(LLMClient):
             "stream": False,
             **kwargs,
         }
+        if tools:
+            payload["tools"] = tools
 
         response = await self.client.post(f"{self.api_prefix}/chat/completions", json=payload)
         response.raise_for_status()
@@ -80,10 +87,31 @@ class CustomAdapter(LLMClient):
         choice = data["choices"][0]
         message = choice.get("message", {})
 
-        # 优先使用 content，如果没有则使用 reasoning_content
+        # 优先使用 content,如果没有则使用 reasoning_content
         content = message.get("content", "")
         if not content:
             content = message.get("reasoning_content", "")
+
+        # Non-streaming tool_calls (already complete arguments)
+        tool_calls: Optional[list[ToolCall]] = None
+        raw_tcs = message.get("tool_calls")
+        if raw_tcs:
+            agg = OpenAIToolCallAggregator()
+            # Reuse the streaming aggregator: feed each call as a single delta
+            # so JSON parsing / error handling stays consistent.
+            for i, tc in enumerate(raw_tcs):
+                fn = tc.get("function", {})
+                agg.feed([
+                    {
+                        "index": tc.get("index", i),
+                        "id": tc.get("id", ""),
+                        "function": {
+                            "name": fn.get("name", ""),
+                            "arguments": fn.get("arguments", ""),
+                        },
+                    }
+                ])
+            tool_calls = agg.finalize()
 
         return LLMResponse(
             content=content,
@@ -91,6 +119,7 @@ class CustomAdapter(LLMClient):
             token_usage=token_usage,
             finish_reason=choice.get("finish_reason", "stop"),
             raw_response=data,
+            tool_calls=tool_calls,
         )
 
     async def _chat_generic_format(self, messages: list[Message], **kwargs) -> LLMResponse:
@@ -114,16 +143,26 @@ class CustomAdapter(LLMClient):
             raw_response=data,
         )
 
-    async def chat_stream(self, messages: list[Message], **kwargs) -> AsyncIterator[StreamChunk]:
-        """发送对话请求（流式）"""
+    async def chat_stream(
+        self,
+        messages: list[Message],
+        tools: Optional[list[dict]] = None,
+        **kwargs,
+    ) -> AsyncIterator[StreamChunk]:
+        """发送对话请求(流式)"""
         if self.api_format == "openai":
-            async for chunk in self._chat_stream_openai_format(messages, **kwargs):
+            async for chunk in self._chat_stream_openai_format(messages, tools=tools, **kwargs):
                 yield chunk
         else:
             async for chunk in self._chat_stream_generic_format(messages, **kwargs):
                 yield chunk
 
-    async def _chat_stream_openai_format(self, messages: list[Message], **kwargs) -> AsyncIterator[StreamChunk]:
+    async def _chat_stream_openai_format(
+        self,
+        messages: list[Message],
+        tools: Optional[list[dict]] = None,
+        **kwargs,
+    ) -> AsyncIterator[StreamChunk]:
         """OpenAI 兼容格式流式请求"""
         payload = {
             "model": self.model,
@@ -131,6 +170,10 @@ class CustomAdapter(LLMClient):
             "stream": True,
             **kwargs,
         }
+        if tools:
+            payload["tools"] = tools
+
+        agg = OpenAIToolCallAggregator()
 
         async with self.client.stream("POST", f"{self.api_prefix}/chat/completions", json=payload) as response:
             response.raise_for_status()
@@ -152,7 +195,12 @@ class CustomAdapter(LLMClient):
 
                             delta = choices[0].get("delta", {})
 
-                            # 优先使用 content，如果没有则使用 reasoning_content
+                            # Tool-calls aggregation
+                            tc_deltas = delta.get("tool_calls")
+                            if tc_deltas:
+                                agg.feed(tc_deltas)
+
+                            # 优先使用 content,如果没有则使用 reasoning_content
                             content = delta.get("content", "")
                             if content is None:
                                 content = delta.get("reasoning_content", "")
@@ -161,13 +209,39 @@ class CustomAdapter(LLMClient):
 
                             finish_reason = choices[0].get("finish_reason")
 
-                            yield StreamChunk(
-                                content=content,
-                                model=data.get("model", self.model),
-                                finish_reason=finish_reason,
-                            )
+                            if content or finish_reason is None:
+                                yield StreamChunk(
+                                    content=content,
+                                    model=data.get("model", self.model),
+                                    finish_reason=finish_reason,
+                                )
+
+                            if finish_reason and agg.has_calls():
+                                yield StreamChunk(
+                                    content="",
+                                    model=data.get("model", self.model),
+                                    finish_reason=finish_reason,
+                                    tool_calls=agg.finalize(),
+                                )
+                                agg = OpenAIToolCallAggregator()
+                            elif finish_reason:
+                                yield StreamChunk(
+                                    content="",
+                                    model=data.get("model", self.model),
+                                    finish_reason=finish_reason,
+                                )
                         except json.JSONDecodeError:
                             continue
+
+        # If the stream ended without a finish_reason but tool calls were
+        # emitted (rare), still surface them.
+        if agg.has_calls():
+            yield StreamChunk(
+                content="",
+                model=self.model,
+                finish_reason="tool_calls",
+                tool_calls=agg.finalize(),
+            )
 
     async def _chat_stream_generic_format(self, messages: list[Message], **kwargs) -> AsyncIterator[StreamChunk]:
         """通用格式流式请求"""

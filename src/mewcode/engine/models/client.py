@@ -16,13 +16,22 @@ class LLMClient(ABC):
         self.config = kwargs
 
     @abstractmethod
-    async def chat(self, messages: list[Message], **kwargs) -> LLMResponse:
+    async def chat(
+        self,
+        messages: list[Message],
+        tools: Optional[list[dict]] = None,
+        **kwargs,
+    ) -> LLMResponse:
         """
-        发送对话请求（非流式）
+        发送对话请求(非流式)
 
         Args:
             messages: 消息列表
-            **kwargs: 其他参数（temperature, max_tokens 等）
+            tools: 可选,已经按目标协议格式化好的工具描述列表
+                   (调用方应使用 ToolRegistry.to_openai_format() 或
+                    to_anthropic_format() 准备)。当为 None 或空列表时,
+                    适配器不向 API 发送 tools 参数。
+            **kwargs: 其他参数(temperature, max_tokens 等)
 
         Returns:
             LLMResponse: 响应对象
@@ -30,16 +39,23 @@ class LLMClient(ABC):
         pass
 
     @abstractmethod
-    async def chat_stream(self, messages: list[Message], **kwargs) -> AsyncIterator[StreamChunk]:
+    async def chat_stream(
+        self,
+        messages: list[Message],
+        tools: Optional[list[dict]] = None,
+        **kwargs,
+    ) -> AsyncIterator[StreamChunk]:
         """
-        发送对话请求（流式）
+        发送对话请求(流式)
 
         Args:
             messages: 消息列表
+            tools: 可选,已经按目标协议格式化好的工具描述列表(同 chat)
             **kwargs: 其他参数
 
         Yields:
-            StreamChunk: 流式响应块
+            StreamChunk: 流式响应块。当模型请求工具时,适配器在最后
+                        emit 一个携带 tool_calls 的 StreamChunk。
         """
         pass
 

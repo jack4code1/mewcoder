@@ -1,22 +1,61 @@
 """MewCode TUI Application"""
 
-import asyncio
-import logging
+import os
 from datetime import datetime
+from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import Footer, Header
 
-from ..config import get_model_config, load_config
+from ..config import get_model_config, get_tools_config, load_config
 from ..engine.adapters import AdapterFactory
+from ..engine.adapters.claude_adapter import ClaudeAdapter
 from ..engine.conversation import ConversationManager
-from ..engine.models import Message, MessageRole
+from ..engine.models import Message, MessageRole, ToolCall
+from ..engine.tools import (
+    ToolContext,
+    ToolResult,
+    build_default_registry,
+    build_system_prompt,
+)
 from ..logger import logger
 from .widgets.chat_area import ChatArea
 from .widgets.input_box import InputBox, InputSubmitted, TabPressed
 from .widgets.status_bar import StatusBar
+
+
+def _summarize_tool_input(name: str, input: dict) -> str:
+    """Produce a short, human-readable summary for the TUI trace line."""
+    if not isinstance(input, dict):
+        return ""
+    if name == "ReadFile":
+        return str(input.get("path", ""))
+    if name == "WriteFile":
+        return str(input.get("path", ""))
+    if name == "EditFile":
+        return str(input.get("path", ""))
+    if name == "Bash":
+        cmd = str(input.get("command", ""))
+        return cmd[:60] + ("..." if len(cmd) > 60 else "")
+    if name == "Glob":
+        return str(input.get("pattern", ""))
+    if name == "Grep":
+        return str(input.get("pattern", ""))
+    # fallback: first scalar value
+    for v in input.values():
+        if isinstance(v, (str, int, float, bool)):
+            return str(v)[:60]
+    return ""
+
+
+def _summarize_tool_result(content: str) -> str:
+    """First non-empty line of the tool's result, capped."""
+    if not content:
+        return ""
+    line = content.splitlines()[0].strip()
+    return line[:80] + ("..." if len(line) > 80 else "")
 
 
 class MewCodeApp(App):
@@ -40,6 +79,11 @@ class MewCodeApp(App):
     }
 
     .chat-msg {
+        margin: 0 1;
+        padding: 0 1;
+    }
+
+    .tool-msg {
         margin: 0 1;
         padding: 0 1;
     }
@@ -87,6 +131,16 @@ class MewCodeApp(App):
         self.llm_client = None
         self.mode = "Chat"  # Chat or Single
         self.is_processing = False
+
+        # Tool subsystem (chapter 02-tools): locked at startup
+        self.tool_context: ToolContext = ToolContext.detect(
+            working_dir=Path(os.getcwd())
+        )
+        self.tool_registry = build_default_registry(self.tool_context, self.config)
+        logger.info(
+            "Tool registry initialised: %s",
+            [t.name for t in self.tool_registry.list_enabled()],
+        )
 
     def compose(self) -> ComposeResult:
         """Compose the TUI layout"""
@@ -210,67 +264,170 @@ class MewCodeApp(App):
         logger.info("Starting LLM worker...")
         self.run_worker(self._process_with_llm(content), exclusive=True)
 
+    # ------------------------------------------------------------------
+    # LLM driver: single-step tool flow (chapter 02-tools)
+    # ------------------------------------------------------------------
+
+    def _build_tools_payload(self) -> list[dict]:
+        """Pick the tools-API format that matches the active adapter."""
+        if isinstance(self.llm_client, ClaudeAdapter):
+            return self.tool_registry.to_anthropic_format()
+        return self.tool_registry.to_openai_format()
+
+    def _ensure_llm_client(self) -> bool:
+        """Lazily create the LLM client on first use. Returns True on success."""
+        if self.llm_client is not None:
+            return True
+        chat_area = self.query_one("#chat-area", ChatArea)
+        try:
+            model_cfg = get_model_config(self.config, self.model)
+            self.llm_client = AdapterFactory.create_client(
+                model=self.model,
+                provider=self.provider or model_cfg.get("provider"),
+                api_key=model_cfg.get("api_key"),
+                base_url=model_cfg.get("base_url"),
+                api_format=model_cfg.get("api_format", "openai"),
+            )
+            logger.info("LLM client created: %s", type(self.llm_client).__name__)
+            return True
+        except Exception as e:
+            logger.error("Error creating LLM client: %s", e, exc_info=True)
+            chat_area.add_system_message(f"Error creating LLM client: {e}")
+            return False
+
+    def _messages_with_system(self) -> list[Message]:
+        """Return current conversation messages with the tool system prompt
+        prepended for *this* request only. The system prompt is rebuilt
+        every call so cwd/OS/tool list stay accurate, and is NOT persisted
+        into the conversation history."""
+        sys_text = build_system_prompt(self.tool_context, self.tool_registry)
+        sys_msg = Message(role=MessageRole.SYSTEM, content=sys_text)
+        return [sys_msg] + self.conversation_manager.get_messages()
+
     async def _process_with_llm(self, content: str) -> None:
-        """Process message with LLM"""
+        """Drive the single-step tool flow.
+
+        Step A — first stream:
+          - Render text deltas in the chat area.
+          - Capture the final StreamChunk's tool_calls (if any).
+          - Persist the assistant message (with tool_calls) into history.
+        Step B — execute each tool call serially:
+          - Show the trace line, run the tool, update the trace line.
+          - Persist the TOOL-role result message into history.
+        Step C — second stream:
+          - Stream and render the model's final reply.
+          - Persist as a plain assistant message. Even if the model emits
+            tool_calls again, we IGNORE them this chapter (single-step gate,
+            spec AC17).
+
+        If step A produces no tool_calls, step B/C are skipped — pure-chat
+        behaviour from chapter 01 is preserved exactly.
+        """
         logger.info("Starting LLM processing...")
         self.is_processing = True
         chat_area = self.query_one("#chat-area", ChatArea)
         status_bar = self.query_one("#status-bar", StatusBar)
 
         try:
-            # Update status
             status_bar.update_agent_status("Thinking...")
-            logger.info("Status updated to Thinking...")
 
-            # Get or create LLM client
-            if self.llm_client is None:
-                logger.info(f"Creating LLM client: model={self.model}, provider={self.provider}")
-                try:
-                    model_cfg = get_model_config(self.config, self.model)
-                    self.llm_client = AdapterFactory.create_client(
-                        model=self.model,
-                        provider=self.provider or model_cfg.get("provider"),
-                        api_key=model_cfg.get("api_key"),
-                        base_url=model_cfg.get("base_url"),
-                        api_format=model_cfg.get("api_format", "openai"),
-                    )
-                    logger.info("LLM client created successfully")
-                except Exception as e:
-                    logger.error(f"Error creating LLM client: {e}")
-                    chat_area.add_system_message(f"Error creating LLM client: {e}")
-                    return
+            if not self._ensure_llm_client():
+                return
 
-            # Get messages
-            messages = self.conversation_manager.get_messages()
-            logger.info(f"Got {len(messages)} messages")
+            tools_payload = self._build_tools_payload()
 
-            # Stream response
-            full_response = ""
+            # ---------- Step A: first stream ----------
             chat_area.add_assistant_message_start()
-            logger.info("Starting stream...")
-
-            async for chunk in self.llm_client.chat_stream(messages):
+            first_text = ""
+            pending_tool_calls: list[ToolCall] = []
+            async for chunk in self.llm_client.chat_stream(
+                self._messages_with_system(), tools=tools_payload
+            ):
                 if chunk.content:
-                    full_response += chunk.content
+                    first_text += chunk.content
                     chat_area.add_stream_chunk(chunk.content)
-                    logger.debug(f"Chunk: {chunk.content[:20]}...")
-
+                if chunk.tool_calls:
+                    # Last non-empty wins — adapters emit one final chunk.
+                    pending_tool_calls = list(chunk.tool_calls)
             chat_area.add_assistant_message_end()
-            logger.info(f"Stream completed. Response length: {len(full_response)}")
 
-            # Add assistant message to conversation
-            assistant_message = Message(
-                role=MessageRole.ASSISTANT,
-                content=full_response,
+            self.conversation_manager.add_message(
+                Message(
+                    role=MessageRole.ASSISTANT,
+                    content=first_text,
+                    tool_calls=pending_tool_calls or None,
+                )
             )
-            self.conversation_manager.add_message(assistant_message)
 
-            # Update status
+            if not pending_tool_calls:
+                status_bar.update_agent_status("Idle")
+                return
+
+            # ---------- Step B: execute each tool ----------
+            for tc in pending_tool_calls:
+                params_summary = _summarize_tool_input(tc.name, tc.input)
+                widget_id = chat_area.add_tool_call(tc.name, params_summary)
+
+                if tc.parse_error:
+                    result = ToolResult(
+                        content=f"Tool arguments could not be parsed: {tc.parse_error}",
+                        is_error=True,
+                        metadata={"tool": tc.name},
+                    )
+                else:
+                    try:
+                        result = await self.tool_registry.execute(tc.name, tc.input)
+                    except Exception as e:  # ToolError or anything else
+                        logger.exception("Unexpected tool dispatch failure")
+                        result = ToolResult(
+                            content=f"Tool dispatch failed: {e}",
+                            is_error=True,
+                            metadata={"tool": tc.name},
+                        )
+
+                chat_area.update_tool_call_result(
+                    widget_id,
+                    success=not result.is_error,
+                    summary=_summarize_tool_result(result.content),
+                )
+                self.conversation_manager.add_message(
+                    Message(
+                        role=MessageRole.TOOL,
+                        content=result.content,
+                        tool_call_id=tc.id,
+                        tool_result_is_error=bool(result.is_error),
+                    )
+                )
+
+            # ---------- Step C: second stream (final reply) ----------
+            chat_area.add_assistant_message_start()
+            final_text = ""
+            ignored_tool_calls = False
+            async for chunk in self.llm_client.chat_stream(
+                self._messages_with_system(), tools=tools_payload
+            ):
+                if chunk.content:
+                    final_text += chunk.content
+                    chat_area.add_stream_chunk(chunk.content)
+                if chunk.tool_calls:
+                    # Single-step gate: ignore. (spec AC17)
+                    ignored_tool_calls = True
+            chat_area.add_assistant_message_end()
+
+            if ignored_tool_calls:
+                logger.info(
+                    "Second response contained tool_calls; ignored (single-step gate)."
+                )
+
+            self.conversation_manager.add_message(
+                Message(role=MessageRole.ASSISTANT, content=final_text)
+            )
+
             status_bar.update_agent_status("Idle")
-            logger.info("Processing completed successfully")
+            logger.info("Processing completed (single-step tool flow).")
 
         except Exception as e:
-            logger.error(f"Error in LLM processing: {e}", exc_info=True)
+            logger.error("Error in LLM processing: %s", e, exc_info=True)
             chat_area.add_system_message(f"Error: {e}")
             status_bar.update_agent_status("Error")
 

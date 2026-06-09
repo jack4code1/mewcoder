@@ -45,3 +45,10 @@ Thumbs.db
 
 # MewCode
 .mewcode/
+
+# Local models / weights (large binaries — keep out of git)
+# Anchored to repo root so it doesn't shadow src/mewcode/engine/models/
+/models/
+
+# Claude Code per-machine settings (skills DO go in)
+.claude/settings.local.json

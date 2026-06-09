@@ -15,6 +15,12 @@ llm:
       api_format: "openai"
       model: "mimo-v2.5-pro"
 
+    gemma4-12b-it-qat:
+      provider: "ollama"
+      base_url: "http://localhost:11434"
+      api_format: "openai"
+      model: "gemma4-12b-it-qat"
+
 # 会话配置
 session:
   storage_dir: "~/.mewcode/sessions"
@@ -25,3 +31,10 @@ tui:
   theme: "default"
   show_token_usage: true
   show_session_duration: true
+
+# 工具子系统(02-tools 章节新增)
+tools:
+  enabled: "all"           # "all" | "readonly" | [ReadFile, Glob, Grep, ...]
+  bash_timeout: 30          # Bash 工具默认超时(秒),max 600
+  max_output_chars: 10000   # 单个工具返回内容上限
+
