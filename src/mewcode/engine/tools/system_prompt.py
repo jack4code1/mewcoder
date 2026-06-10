@@ -1,7 +1,7 @@
 """Build the English system prompt that primes the model for tool use.
 
 Output is appended (as a system message) at the head of every chat
-request — see plan §模块设计 / §模块交互. Content is intentionally short:
+request. Content is intentionally short:
 the actual tool descriptions travel in the `tools` parameter, so the
 system prompt only needs cwd / OS / orientation guidelines and the
 language policy.

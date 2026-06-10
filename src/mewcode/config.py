@@ -1,5 +1,6 @@
 """Configuration loader for MewCode"""
 
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -21,7 +22,13 @@ def load_config(path: Optional[str] = None) -> dict:
 def get_model_config(config: dict, model: str) -> dict[str, Any]:
     """获取指定模型的配置(api_key, base_url, api_format 等)"""
     models = config.get("llm", {}).get("models", {})
-    return models.get(model, {})
+    model_config = dict(models.get(model, {}) or {})
+    api_key_env = model_config.get("api_key_env")
+    if api_key_env:
+        env_value = os.environ.get(str(api_key_env))
+        if env_value:
+            model_config["api_key"] = env_value
+    return model_config
 
 
 _DEFAULT_TOOLS_CONFIG = {

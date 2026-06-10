@@ -4,6 +4,138 @@
 
 ---
 
+## V0.5 — 2026-06-10 — Codex
+
+### Agent Loop 多步循环 — 04-agent-loop 章节
+
+基于 `specs/04-agent-loop/` 四份文档实现 ReAct Agent Loop,将原先 TUI 内的单步工具调用流程升级为引擎层多轮循环。范围包含 AgentEvent 事件流、停止条件、工具分批执行、TUI 事件消费,以及两个输入框交互 BUG 修复。
+
+**新增章节文档** — `specs/04-agent-loop/`
+
+- `spec.md` — Agent Loop 能力边界、停止条件、事件流、TUI 输入回归修复范围
+- `plan.md` — 引擎层 Agent Loop、AgentEvent、工具分批、取消和 TUI 接入设计
+- `task.md` — 10 个任务,覆盖事件模型、循环、停止条件、批处理、TUI 接入、输入框修复和验证
+- `checklist.md` — 可观测验收项,含 50 轮上限、3 次无效工具终止、Esc 取消、Enter 清空、Up/Down 历史
+
+**新增模块**
+
+- `src/mewcode/engine/agent_events.py`
+  - 定义 `AgentEventType`,覆盖 `stream_text` / `tool_use` / `tool_result` / `turn_complete` / `loop_complete` / `usage` / `error`
+  - 定义 `AgentStopReason`,覆盖模型自然完成、最大迭代、用户取消、重复无效工具和不可恢复错误
+  - 提供 `AgentEvent` 工厂方法,让 UI 和测试按事件类型消费 payload
+- `src/mewcode/engine/agent.py`
+  - 新增 `run_agent_loop(...)` async generator
+  - 模型无工具调用时自然结束
+  - 模型有工具调用时持久化 assistant 消息、执行工具、持久化 tool result,再进入下一轮
+  - assistant 文本和 tool_calls 保持在同一条 assistant message
+  - tool result 保留原始 `tool_call_id`
+  - 支持最大 50 轮迭代、取消事件、连续 3 次 unknown/disabled tool 终止
+  - 支持按 `is_concurrency_safe` 将工具调用分成并发批和串行批
+
+**TUI 接入**
+
+- `src/mewcode/tui/app.py`
+  - `_process_with_llm` 改为消费 AgentEvent,不再直接控制单步工具流程
+  - 删除第二轮 tool_calls 忽略逻辑,模型可继续多轮调用工具
+  - `stream_text` 更新当前 assistant 流式消息
+  - `tool_use` / `tool_result` 驱动工具 trace 的 pending / success / error 状态
+  - `usage` 更新状态栏 token 显示
+  - `loop_complete` 统一恢复 Idle
+  - 新增 `Esc` 取消当前 Agent Loop,保留 `Ctrl+C` 退出应用
+
+**输入框 BUG 修复**
+
+- `src/mewcode/tui/widgets/input_box.py`
+  - 显式处理子 `Input` 的 Enter submit 事件,提交后立即清空输入栏
+  - 显式处理 Up / Down 按键,支持在已提交提示词之间快速切换
+  - 空输入不会加入历史
+  - Down 从最新历史项回到空输入
+
+**测试**
+
+- `tests/test_agent_events.py` — 覆盖 AgentEvent payload
+- `tests/test_agent_loop.py` — 覆盖纯聊天结束、多轮工具循环、连续无效工具终止、最大迭代、取消、工具分批
+- `tests/test_input_box.py` — 覆盖 Enter 清空、空输入不入历史、Up/Down 历史导航
+- `tests/test_tui_agent_loop.py` — 覆盖 TUI 消费 Agent Loop 多轮工具事件
+- `tests/test_tui_tool_flow.py`
+  - 原“第二次 tool_calls 忽略”回归改为“第二次 tool_calls 继续循环”
+
+**文档**
+
+- `README.md` / `MANUAL.md`
+  - 更新工具流程为 Agent Loop 多步循环
+  - 增加 `Esc` 取消当前循环
+  - 明确 `Enter` 提交后清空输入栏、`↑` / `↓` 浏览历史提示词
+- `.gitignore`
+  - 忽略测试运行目录 `.tmp_pytest/` 和 `.mewcode_test_sessions/`
+
+**运行验证**
+
+- `python -m pytest tests/test_agent_events.py tests/test_agent_loop.py tests/test_input_box.py -v -p no:cacheprovider` → 13 passed
+- `python -m pytest tests/test_tui_agent_loop.py tests/test_tui_tool_flow.py tests/test_tui_tool_trace.py tests/test_input_box.py -v -p no:cacheprovider` → 12 passed
+- `python -m pytest tests/test_message_tool_calls.py tests/test_adapter_tool_calls.py tests/test_adapter_anthropic_tool_use.py -v -p no:cacheprovider` → 38 passed
+- `rg "single-step gate|single-step tool flow" src\mewcode` → no output
+- `TMP=.tmp_pytest TEMP=.tmp_pytest python -m pytest tests/ -v -p no:cacheprovider` → 164 passed
+
+**环境说明**
+
+- 当前 Windows 用户 Temp 目录不可写,直接运行全量测试会在 `tmp_path` fixture 创建阶段失败。将 `TMP` / `TEMP` 指向工作区内 `.tmp_pytest` 后全量测试通过。
+
+---
+
+## V0.4 — 2026-06-10 — Codex
+
+### 工具系统验收加固 — 03-tools-hardening 章节
+
+基于 `specs/02-tools/checklist.md` 的验收结果,补齐配置安全、自动化验收和 checklist 分类能力。保留明文 API Key 配置方式,新增环境变量优先读取。
+
+**新增章节文档** — `specs/03-tools-hardening/`
+
+- `spec.md` — 明确本章只做工具系统验收修正与测试增强,不引入 Agent Loop、权限系统或新工具
+- `plan.md` — 设计 `api_key_env` 环境变量优先、明文 `api_key` fallback 的配置解析方案
+- `task.md` — 10 个任务,覆盖配置解析、文档、语言扫描、TUI 测试、payload 测试、验收与 changelog
+- `checklist.md` — 分成 Automated Checks / Static Scans / Config Integration / Manual TUI Checks / Real API Checks / Final Regression
+
+**配置解析**
+
+- `src/mewcode/config.py`
+  - `get_model_config()` 返回模型配置副本,避免调用方意外改动原始配置
+  - 支持可选 `api_key_env`:当指定环境变量存在且非空时,返回配置中的 `api_key` 使用环境变量值
+  - 环境变量缺失或为空时,继续使用现有明文 `api_key`
+- `config.yaml`
+  - 默认自定义模型增加 `api_key_env: "MIMO_API_KEY"`
+  - 保留现有 `api_key` 明文 fallback
+
+**文档**
+
+- `README.md` / `MANUAL.md`
+  - 配置示例新增 `api_key_env`
+  - 说明环境变量优先、明文 `api_key` 作为 fallback
+  - 示例只使用 placeholder,不公开真实密钥
+
+**语言策略修正**
+
+- `src/mewcode/engine/tools/system_prompt.py`
+  - 移除工具实现目录中的中文 docstring 命中
+  - 保持运行时 system prompt 和工具描述为英文
+
+**新增测试**
+
+- `tests/test_config_env.py` — 覆盖环境变量优先、明文 fallback、空环境值 fallback、配置不被 mutation
+- `tests/test_tui_tool_trace.py` — 覆盖工具调用 trace 的 pending / success / error 三种显示状态
+- `tests/test_tui_tool_flow.py` — 用 fake LLM client 覆盖 ReadFile 成功、ReadFile 失败、Bash、第二次 tool_calls 忽略、纯对话回归
+- `tests/test_payload_language.py` — 覆盖 payload 中 system prompt、工具描述、metadata 不泄漏、模型可见字符串无中文
+
+**已运行验证**
+
+- `python -m pytest tests/test_config_env.py tests/test_tui_tool_trace.py tests/test_tui_tool_flow.py tests/test_payload_language.py -v` → 17 passed
+- `python -m pytest tests/ -v` → 150 passed
+- `rg "[\p{Han}]" src\mewcode\engine\tools` → no output
+- `rg "api_key_env" config.yaml README.md MANUAL.md` → all three files matched
+- `rg "tp-" README.md MANUAL.md tests` → no output
+
+---
+
 ## V0.3 — 2026-06-09 — Claude
 
 ### 工具系统(单步) — 02-tools 章节

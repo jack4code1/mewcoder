@@ -6,16 +6,24 @@ from pathlib import Path
 
 def setup_logging(log_file: str = None, console_output: bool = False):
     """Setup logging configuration"""
-    # Create logs directory
-    log_dir = Path.home() / ".mewcode" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    handlers: list[logging.Handler] = []
 
-    # Default log file
-    if log_file is None:
-        log_file = log_dir / "mewcode.log"
+    try:
+        # Create logs directory. Tests/sandboxes can override this with a
+        # writable path; if the user directory is unavailable, logging falls
+        # back to a NullHandler instead of preventing imports.
+        log_dir = Path(
+            os.getenv("MEWCODE_LOG_DIR", str(Path.home() / ".mewcode" / "logs"))
+        ).expanduser()
+        log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Configure logging
-    handlers = [logging.FileHandler(log_file, encoding='utf-8')]
+        # Default log file
+        if log_file is None:
+            log_file = log_dir / "mewcode.log"
+
+        handlers.append(logging.FileHandler(log_file, encoding='utf-8'))
+    except OSError:
+        handlers.append(logging.NullHandler())
 
     # Only add console handler if explicitly requested
     if console_output:

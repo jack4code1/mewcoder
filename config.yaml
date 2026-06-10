@@ -11,6 +11,7 @@ llm:
     mimo-v2.5-pro:
       provider: "custom"
       base_url: "https://token-plan-cn.xiaomimimo.com/v1"
+      api_key_env: "MIMO_API_KEY"
       api_key: "tp-ckg4u5c9o7dkg07yw1i72bogp7vtfljfm6gc34zkfn0fjw57"
       api_format: "openai"
       model: "mimo-v2.5-pro"
@@ -37,4 +38,3 @@ tools:
   enabled: "all"           # "all" | "readonly" | [ReadFile, Glob, Grep, ...]
   bash_timeout: 30          # Bash 工具默认超时(秒),max 600
   max_output_chars: 10000   # 单个工具返回内容上限
-

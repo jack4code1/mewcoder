@@ -35,6 +35,7 @@ env/
 
 # pytest
 .pytest_cache/
+.tmp_pytest/
 
 # Logs
 *.log
@@ -45,6 +46,7 @@ Thumbs.db
 
 # MewCode
 .mewcode/
+.mewcode_test_sessions/
 
 # Claude Code per-machine settings (skills DO go in)
 .claude/settings.local.json

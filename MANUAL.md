@@ -56,8 +56,9 @@ python -c "from mewcode.tui.app import run_app; run_app(model='mimo-v2.5-pro', p
 ### 发送消息
 
 1. 在输入框中输入消息
-2. 按 `Enter` 发送
-3. 等待 AI 回复（流式显示）
+2. 按 `Enter` 发送,输入栏会自动清空
+3. 等待 AI 回复（流式显示）。如果模型需要工具,MewCode 会自动进入多轮 Agent Loop,直到任务完成或触发停止条件。
+4. 可用 `↑` / `↓` 快速切换历史提示词。
 
 ### 内置命令
 
@@ -75,14 +76,15 @@ python -c "from mewcode.tui.app import run_app; run_app(model='mimo-v2.5-pro', p
 
 | 快捷键 | 功能 |
 |--------|------|
-| `Enter` | 发送消息 |
+| `Enter` | 发送消息并清空输入栏 |
 | `Ctrl+C` | 退出程序 |
 | `Ctrl+L` | 清空屏幕 |
 | `Ctrl+S` | 保存会话 |
 | `Ctrl+T` | 切换模式 |
 | `Ctrl+Shift+C` | 复制最后一条 AI 回复 |
+| `Esc` | 取消当前 Agent Loop,不退出程序 |
 | `F1` 或 `Ctrl+H` | 显示帮助 |
-| `↑` / `↓` | 浏览历史命令 |
+| `↑` / `↓` | 浏览历史提示词 |
 | `Tab` | 命令补全 |
 
 ### 复制 AI 回复
@@ -104,6 +106,8 @@ python -c "from mewcode.tui.app import run_app; run_app(model='mimo-v2.5-pro', p
 
 ### 配置示例
 
+推荐把 API Key 放在环境变量中；当环境变量不存在或为空时，MewCode 会继续使用 `api_key` 字段中的明文 fallback。
+
 ```yaml
 # LLM 配置
 llm:
@@ -114,7 +118,8 @@ llm:
     mimo-v2.5-pro:
       provider: "custom"
       base_url: "https://token-plan-cn.xiaomimimo.com/v1"
-      api_key: "your-api-key-here"
+      api_key_env: "MIMO_API_KEY"
+      api_key: "your-api-key-fallback"
       api_format: "openai"
       model: "mimo-v2.5-pro"
 
@@ -128,6 +133,13 @@ tui:
   theme: "default"
   show_token_usage: true
   show_session_duration: true
+```
+
+PowerShell 示例：
+
+```powershell
+$env:MIMO_API_KEY="your-api-key"
+.\start.ps1
 ```
 
 ### 支持的模型

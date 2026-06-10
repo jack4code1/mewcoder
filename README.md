@@ -11,6 +11,7 @@ MewCode 是一个轻量级的终端 AI 编程助手，支持多种大语言模�
 - 🤖 **多模型支持** - OpenAI、Claude、Ollama、自定义端点
 - ⚡ **流式对话** - 实时显示 AI 回复
 - 🛠️ **工具调用** - 6 个内置工具(ReadFile / WriteFile / EditFile / Bash / Glob / Grep),让模型可以读写文件、执行命令、检索代码
+- 🔁 **Agent Loop** - 支持多轮 ReAct 循环,模型可连续读文件、改文件、跑命令并根据结果继续
 - 🔌 **双协议适配** - 同时支持 OpenAI tool_calls 与 Anthropic content blocks 两种 Function Calling 协议
 - 📝 **Markdown 渲染** - 支持代码高亮、标题、列表等格式
 - 💾 **会话持久化** - YAML 格式保存对话历史
@@ -135,12 +136,14 @@ LLM 客户端和对话管理的核心模块。
 | `Glob` | search | ✓ | 按 glob 找文件,排除噪音目录,按 mtime 倒序 |
 | `Grep` | search | ✓ | 正则搜内容,跳过二进制,支持 include / 上下文行 |
 
-**单步对话流程**(本章覆盖范围,后续章节会接 Agent Loop 多步循环)
+**Agent Loop 多步流程**
 
 ```
-用户输入 → LLM(第一次) → 模型请求工具 → 本地执行 → 结果回灌 → LLM(第二次) → 最终中文回复
-                                          ↓
-                                  TUI 展示 → ✓/✗ 轨迹
+用户输入 → LLM → 模型请求工具 → 本地执行 → 结果回灌 → LLM → ...
+             ↑                                               │
+             └──────────── 直到模型不再请求工具或触发停止条件 ┘
+
+运行期间 TUI 通过 AgentEvent 实时展示文本、工具调用、工具结果和状态。
 ```
 
 **协议适配**(在 Adapter 内部完成翻译,上层不感知协议差异)
@@ -189,6 +192,8 @@ mewcode/
 │       ├── logger.py           # 日志配置
 │       ├── engine/
 │       │   ├── __init__.py
+│       │   ├── agent.py       # ReAct Agent Loop
+│       │   ├── agent_events.py # AgentEvent 事件模型
 │       │   ├── conversation.py # 会话管理
 │       │   ├── models/
 │       │   │   ├── client.py   # LLM 客户端接口
@@ -211,13 +216,14 @@ mewcode/
 │       │   ├── glob.py
 │       │   └── grep.py
 │       └── tui/
-│           ├── app.py          # TUI 主应用(单步工具调用流程)
+│           ├── app.py          # TUI 主应用(消费 AgentEvent)
 │           └── widgets/
 │               ├── chat_area.py    # 含工具调用轨迹渲染
 │               ├── input_box.py
 │               └── status_bar.py
 ├── specs/                      # 章节化规格文档
-│   └── 02-tools/               # 工具系统(单步)
+│   ├── 02-tools/               # 工具系统(单步)
+│   └── 04-agent-loop/          # Agent Loop 多步循环
 │       ├── spec.md             # 需求(F/N/AC)
 │       ├── plan.md             # 架构设计与决策
 │       ├── task.md             # 任务拆解与依赖图
@@ -262,7 +268,7 @@ cd E:\agent_class\project
 
 ### 配置 API
 
-编辑 `config.yaml` 文件，配置你的 API 密钥：
+编辑 `config.yaml` 文件，配置你的 API 密钥。推荐把密钥放在环境变量中；如果环境变量不存在或为空，MewCode 会继续使用 `api_key` 里的明文 fallback。
 
 ```yaml
 llm:
@@ -273,9 +279,17 @@ llm:
     mimo-v2.5-pro:
       provider: "custom"
       base_url: "https://your-api-endpoint.com/v1"
-      api_key: "your-api-key"
+      api_key_env: "MIMO_API_KEY"
+      api_key: "your-api-key-fallback"
       api_format: "openai"
       model: "mimo-v2.5-pro"
+```
+
+PowerShell 示例：
+
+```powershell
+$env:MIMO_API_KEY="your-api-key"
+.\start.ps1
 ```
 
 ---
@@ -295,16 +309,23 @@ llm:
 
 | 快捷键 | 功能 |
 |--------|------|
-| `Enter` | 发送消息 |
+| `Enter` | 发送消息并清空输入栏 |
 | `Ctrl+C` | 退出程序 |
 | `Ctrl+S` | 保存会话 |
 | `Ctrl+Shift+C` | 复制最后一条 AI 回复 |
-| `↑` / `↓` | 浏览历史命令 |
+| `Esc` | 取消当前 Agent Loop,不退出程序 |
+| `↑` / `↓` | 浏览历史提示词 |
 | `Tab` | 命令补全 |
 
 ---
 
 ## 版本历史
+
+- **v0.2** - Agent Loop 多步循环
+  - 新增引擎层 Agent Loop 和 AgentEvent 事件流
+  - 支持多轮工具调用,不再忽略第二轮 tool_calls
+  - 支持 50 轮迭代上限、重复无效工具终止和 Esc 取消
+  - 修复 Enter 提交后输入栏不清空、上下方向键切换历史提示词问题
 
 - **v0.1** - 工具系统(单步)
   - 6 个内置工具:ReadFile / WriteFile / EditFile / Bash / Glob / Grep

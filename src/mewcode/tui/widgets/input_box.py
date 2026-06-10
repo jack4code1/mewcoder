@@ -1,8 +1,10 @@
 """Input box widget for user input"""
 
+from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
+from textual.events import Key
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
@@ -34,6 +36,28 @@ class InputBox(Widget):
         self.history = []
         self.history_index = -1
 
+    @on(Input.Submitted, "#input-field")
+    def _on_text_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle Enter from the focused child Input."""
+        event.stop()
+        self.action_submit()
+
+    def on_key(self, event: Key) -> None:
+        """Handle prompt history keys while the child Input is focused."""
+        if event.key == "up":
+            event.prevent_default()
+            event.stop()
+            self.action_history_prev()
+        elif event.key == "down":
+            event.prevent_default()
+            event.stop()
+            self.action_history_next()
+
+    def _set_input_value(self, value: str) -> None:
+        input_field = self.query_one("#input-field", Input)
+        input_field.value = value
+        input_field.cursor_position = len(value)
+
     def action_submit(self) -> None:
         """Submit the input"""
         input_field = self.query_one("#input-field", Input)
@@ -45,7 +69,7 @@ class InputBox(Widget):
             self.history_index = len(self.history)
 
             # Clear input
-            input_field.value = ""
+            self._set_input_value("")
 
             # Post message to parent
             self.post_message(InputSubmitted(value))
@@ -54,19 +78,16 @@ class InputBox(Widget):
         """Navigate to previous history item"""
         if self.history and self.history_index > 0:
             self.history_index -= 1
-            input_field = self.query_one("#input-field", Input)
-            input_field.value = self.history[self.history_index]
+            self._set_input_value(self.history[self.history_index])
 
     def action_history_next(self) -> None:
         """Navigate to next history item"""
         if self.history_index < len(self.history) - 1:
             self.history_index += 1
-            input_field = self.query_one("#input-field", Input)
-            input_field.value = self.history[self.history_index]
+            self._set_input_value(self.history[self.history_index])
         elif self.history_index == len(self.history) - 1:
             self.history_index = len(self.history)
-            input_field = self.query_one("#input-field", Input)
-            input_field.value = ""
+            self._set_input_value("")
 
     def action_tab_complete(self) -> None:
         """Tab completion or prompt optimization"""

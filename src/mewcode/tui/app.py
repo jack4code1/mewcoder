@@ -1,5 +1,6 @@
 """MewCode TUI Application"""
 
+import asyncio
 import os
 from datetime import datetime
 from pathlib import Path
@@ -13,10 +14,11 @@ from ..config import get_model_config, get_tools_config, load_config
 from ..engine.adapters import AdapterFactory
 from ..engine.adapters.claude_adapter import ClaudeAdapter
 from ..engine.conversation import ConversationManager
-from ..engine.models import Message, MessageRole, ToolCall
+from ..engine.agent import run_agent_loop
+from ..engine.agent_events import AgentEventType, AgentStopReason
+from ..engine.models import Message, MessageRole
 from ..engine.tools import (
     ToolContext,
-    ToolResult,
     build_default_registry,
     build_system_prompt,
 )
@@ -24,38 +26,6 @@ from ..logger import logger
 from .widgets.chat_area import ChatArea
 from .widgets.input_box import InputBox, InputSubmitted, TabPressed
 from .widgets.status_bar import StatusBar
-
-
-def _summarize_tool_input(name: str, input: dict) -> str:
-    """Produce a short, human-readable summary for the TUI trace line."""
-    if not isinstance(input, dict):
-        return ""
-    if name == "ReadFile":
-        return str(input.get("path", ""))
-    if name == "WriteFile":
-        return str(input.get("path", ""))
-    if name == "EditFile":
-        return str(input.get("path", ""))
-    if name == "Bash":
-        cmd = str(input.get("command", ""))
-        return cmd[:60] + ("..." if len(cmd) > 60 else "")
-    if name == "Glob":
-        return str(input.get("pattern", ""))
-    if name == "Grep":
-        return str(input.get("pattern", ""))
-    # fallback: first scalar value
-    for v in input.values():
-        if isinstance(v, (str, int, float, bool)):
-            return str(v)[:60]
-    return ""
-
-
-def _summarize_tool_result(content: str) -> str:
-    """First non-empty line of the tool's result, capped."""
-    if not content:
-        return ""
-    line = content.splitlines()[0].strip()
-    return line[:80] + ("..." if len(line) > 80 else "")
 
 
 class MewCodeApp(App):
@@ -116,6 +86,7 @@ class MewCodeApp(App):
         Binding("ctrl+o", "switch_model", "Model"),
         Binding("ctrl+t", "toggle_mode", "Mode"),
         Binding("ctrl+shift+c", "copy_last_reply", "Copy"),
+        Binding("escape", "cancel_agent", "Cancel"),
         Binding("f1", "show_help", "Help"),
         Binding("ctrl+h", "show_help", "Help"),
     ]
@@ -131,6 +102,7 @@ class MewCodeApp(App):
         self.llm_client = None
         self.mode = "Chat"  # Chat or Single
         self.is_processing = False
+        self._agent_cancel_event: asyncio.Event | None = None
 
         # Tool subsystem (chapter 02-tools): locked at startup
         self.tool_context: ToolContext = ToolContext.detect(
@@ -265,7 +237,7 @@ class MewCodeApp(App):
         self.run_worker(self._process_with_llm(content), exclusive=True)
 
     # ------------------------------------------------------------------
-    # LLM driver: single-step tool flow (chapter 02-tools)
+    # LLM driver: Agent Loop event consumer
     # ------------------------------------------------------------------
 
     def _build_tools_payload(self) -> list[dict]:
@@ -305,26 +277,10 @@ class MewCodeApp(App):
         return [sys_msg] + self.conversation_manager.get_messages()
 
     async def _process_with_llm(self, content: str) -> None:
-        """Drive the single-step tool flow.
-
-        Step A — first stream:
-          - Render text deltas in the chat area.
-          - Capture the final StreamChunk's tool_calls (if any).
-          - Persist the assistant message (with tool_calls) into history.
-        Step B — execute each tool call serially:
-          - Show the trace line, run the tool, update the trace line.
-          - Persist the TOOL-role result message into history.
-        Step C — second stream:
-          - Stream and render the model's final reply.
-          - Persist as a plain assistant message. Even if the model emits
-            tool_calls again, we IGNORE them this chapter (single-step gate,
-            spec AC17).
-
-        If step A produces no tool_calls, step B/C are skipped — pure-chat
-        behaviour from chapter 01 is preserved exactly.
-        """
+        """Consume Agent Loop events and update the TUI."""
         logger.info("Starting LLM processing...")
         self.is_processing = True
+        self._agent_cancel_event = asyncio.Event()
         chat_area = self.query_one("#chat-area", ChatArea)
         status_bar = self.query_one("#status-bar", StatusBar)
 
@@ -334,97 +290,66 @@ class MewCodeApp(App):
             if not self._ensure_llm_client():
                 return
 
-            tools_payload = self._build_tools_payload()
+            tool_widgets: dict[str, str] = {}
+            is_streaming = False
 
-            # ---------- Step A: first stream ----------
-            chat_area.add_assistant_message_start()
-            first_text = ""
-            pending_tool_calls: list[ToolCall] = []
-            async for chunk in self.llm_client.chat_stream(
-                self._messages_with_system(), tools=tools_payload
+            async for event in run_agent_loop(
+                llm_client=self.llm_client,
+                conversation_manager=self.conversation_manager,
+                tool_registry=self.tool_registry,
+                tools_payload=self._build_tools_payload(),
+                build_messages=self._messages_with_system,
+                cancel_event=self._agent_cancel_event,
             ):
-                if chunk.content:
-                    first_text += chunk.content
-                    chat_area.add_stream_chunk(chunk.content)
-                if chunk.tool_calls:
-                    # Last non-empty wins — adapters emit one final chunk.
-                    pending_tool_calls = list(chunk.tool_calls)
-            chat_area.add_assistant_message_end()
+                if event.event_type == AgentEventType.STREAM_TEXT:
+                    if not is_streaming:
+                        chat_area.add_assistant_message_start()
+                        is_streaming = True
+                    chat_area.add_stream_chunk(event.text)
 
-            self.conversation_manager.add_message(
-                Message(
-                    role=MessageRole.ASSISTANT,
-                    content=first_text,
-                    tool_calls=pending_tool_calls or None,
-                )
-            )
+                elif event.event_type == AgentEventType.TURN_COMPLETE:
+                    if is_streaming:
+                        chat_area.add_assistant_message_end()
+                        is_streaming = False
+                    status_bar.update_agent_status("Thinking...")
 
-            if not pending_tool_calls:
-                status_bar.update_agent_status("Idle")
-                return
-
-            # ---------- Step B: execute each tool ----------
-            for tc in pending_tool_calls:
-                params_summary = _summarize_tool_input(tc.name, tc.input)
-                widget_id = chat_area.add_tool_call(tc.name, params_summary)
-
-                if tc.parse_error:
-                    result = ToolResult(
-                        content=f"Tool arguments could not be parsed: {tc.parse_error}",
-                        is_error=True,
-                        metadata={"tool": tc.name},
+                elif event.event_type == AgentEventType.TOOL_USE:
+                    status_bar.update_agent_status(f"Running {event.tool_name}...")
+                    widget_id = chat_area.add_tool_call(
+                        event.tool_name or "tool", event.summary
                     )
-                else:
-                    try:
-                        result = await self.tool_registry.execute(tc.name, tc.input)
-                    except Exception as e:  # ToolError or anything else
-                        logger.exception("Unexpected tool dispatch failure")
-                        result = ToolResult(
-                            content=f"Tool dispatch failed: {e}",
-                            is_error=True,
-                            metadata={"tool": tc.name},
+                    if event.tool_call_id:
+                        tool_widgets[event.tool_call_id] = widget_id
+
+                elif event.event_type == AgentEventType.TOOL_RESULT:
+                    widget_id = tool_widgets.get(event.tool_call_id or "")
+                    if widget_id:
+                        chat_area.update_tool_call_result(
+                            widget_id,
+                            success=not event.is_error,
+                            summary=event.summary,
                         )
+                    status_bar.update_agent_status("Thinking...")
 
-                chat_area.update_tool_call_result(
-                    widget_id,
-                    success=not result.is_error,
-                    summary=_summarize_tool_result(result.content),
-                )
-                self.conversation_manager.add_message(
-                    Message(
-                        role=MessageRole.TOOL,
-                        content=result.content,
-                        tool_call_id=tc.id,
-                        tool_result_is_error=bool(result.is_error),
-                    )
-                )
+                elif event.event_type == AgentEventType.USAGE and event.usage:
+                    status_bar.update_token_usage(event.usage.total_tokens, 0)
 
-            # ---------- Step C: second stream (final reply) ----------
-            chat_area.add_assistant_message_start()
-            final_text = ""
-            ignored_tool_calls = False
-            async for chunk in self.llm_client.chat_stream(
-                self._messages_with_system(), tools=tools_payload
-            ):
-                if chunk.content:
-                    final_text += chunk.content
-                    chat_area.add_stream_chunk(chunk.content)
-                if chunk.tool_calls:
-                    # Single-step gate: ignore. (spec AC17)
-                    ignored_tool_calls = True
-            chat_area.add_assistant_message_end()
+                elif event.event_type == AgentEventType.ERROR:
+                    if is_streaming:
+                        chat_area.add_assistant_message_end()
+                        is_streaming = False
+                    chat_area.add_system_message(f"Error: {event.message}")
+                    status_bar.update_agent_status("Error")
 
-            if ignored_tool_calls:
-                logger.info(
-                    "Second response contained tool_calls; ignored (single-step gate)."
-                )
+                elif event.event_type == AgentEventType.LOOP_COMPLETE:
+                    if is_streaming:
+                        chat_area.add_assistant_message_end()
+                        is_streaming = False
+                    if event.stop_reason == AgentStopReason.CANCELLED:
+                        chat_area.add_system_message("Agent cancelled.")
+                    status_bar.update_agent_status("Idle")
 
-            self.conversation_manager.add_message(
-                Message(role=MessageRole.ASSISTANT, content=final_text)
-            )
-
-            status_bar.update_agent_status("Idle")
-            logger.info("Processing completed (single-step tool flow).")
+            logger.info("Processing completed (Agent Loop).")
 
         except Exception as e:
             logger.error("Error in LLM processing: %s", e, exc_info=True)
@@ -433,7 +358,18 @@ class MewCodeApp(App):
 
         finally:
             self.is_processing = False
+            self._agent_cancel_event = None
             logger.info("is_processing set to False")
+
+    def action_cancel_agent(self) -> None:
+        """Cancel the active agent loop without quitting the app."""
+        if self.is_processing and self._agent_cancel_event is not None:
+            self._agent_cancel_event.set()
+            status_bar = self.query_one("#status-bar", StatusBar)
+            status_bar.update_agent_status("Cancelling...")
+            self.notify("Cancelling current request")
+        else:
+            self.notify("No active request to cancel")
 
     def action_copy_last_reply(self) -> None:
         """Copy last AI reply (快捷键触发)"""
