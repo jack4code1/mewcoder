@@ -7,7 +7,12 @@ import httpx
 
 from ..models.client import LLMClient
 from ..models.message import LLMResponse, Message, MessageRole, StreamChunk, ToolCall, TokenUsage
-from ._openai_protocol import OpenAIToolCallAggregator, convert_messages_to_openai
+from ._openai_protocol import (
+    OpenAIToolCallAggregator,
+    add_stream_usage_option,
+    convert_messages_to_openai,
+    token_usage_from_openai_usage,
+)
 
 
 class CustomAdapter(LLMClient):
@@ -78,11 +83,7 @@ class CustomAdapter(LLMClient):
         data = response.json()
 
         usage = data.get("usage", {})
-        token_usage = TokenUsage(
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-            total_tokens=usage.get("total_tokens", 0),
-        )
+        token_usage = token_usage_from_openai_usage(usage)
 
         choice = data["choices"][0]
         message = choice.get("message", {})
@@ -172,6 +173,7 @@ class CustomAdapter(LLMClient):
         }
         if tools:
             payload["tools"] = tools
+        add_stream_usage_option(payload)
 
         agg = OpenAIToolCallAggregator()
 
@@ -190,10 +192,21 @@ class CustomAdapter(LLMClient):
                         try:
                             data = json.loads(line[6:])
                             choices = data.get("choices", [])
+                            token_usage = None
+                            if data.get("usage") is not None:
+                                token_usage = token_usage_from_openai_usage(data["usage"])
+
                             if not choices:
+                                if token_usage is not None:
+                                    yield StreamChunk(
+                                        content="",
+                                        model=data.get("model", self.model),
+                                        token_usage=token_usage,
+                                    )
                                 continue
 
-                            delta = choices[0].get("delta", {})
+                            choice = choices[0]
+                            delta = choice.get("delta", {})
 
                             # Tool-calls aggregation
                             tc_deltas = delta.get("tool_calls")
@@ -207,7 +220,7 @@ class CustomAdapter(LLMClient):
                             if content is None:
                                 content = ""
 
-                            finish_reason = choices[0].get("finish_reason")
+                            finish_reason = choice.get("finish_reason")
 
                             if content or finish_reason is None:
                                 yield StreamChunk(
@@ -221,6 +234,7 @@ class CustomAdapter(LLMClient):
                                     content="",
                                     model=data.get("model", self.model),
                                     finish_reason=finish_reason,
+                                    token_usage=token_usage,
                                     tool_calls=agg.finalize(),
                                 )
                                 agg = OpenAIToolCallAggregator()
@@ -229,6 +243,7 @@ class CustomAdapter(LLMClient):
                                     content="",
                                     model=data.get("model", self.model),
                                     finish_reason=finish_reason,
+                                    token_usage=token_usage,
                                 )
                         except json.JSONDecodeError:
                             continue

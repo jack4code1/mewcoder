@@ -1,5 +1,5 @@
 from mewcode.engine.agent_events import AgentEvent, AgentEventType, AgentStopReason
-from mewcode.engine.models import TokenUsage
+from mewcode.engine.models import ApiCallMetrics, MetricsAggregate, MetricsSnapshot, TokenUsage
 
 
 def test_stream_text_event():
@@ -38,3 +38,22 @@ def test_usage_event_payload():
 
     assert event.event_type == AgentEventType.USAGE
     assert event.usage == usage
+
+
+def test_metrics_event_payload():
+    aggregate = MetricsAggregate()
+    call = ApiCallMetrics(ttft_ms=500, latency_ms=2500)
+    aggregate.add_call(call)
+    usage = TokenUsage(prompt_tokens=1, completion_tokens=2, total_tokens=3)
+    snapshot = MetricsSnapshot(
+        token_usage=usage,
+        api_metrics=aggregate,
+        last_call=call,
+    )
+
+    event = AgentEvent.metrics(snapshot)
+
+    assert event.event_type == AgentEventType.METRICS
+    assert event.usage == usage
+    assert event.metrics_snapshot == snapshot
+    assert event.api_call_metrics == call

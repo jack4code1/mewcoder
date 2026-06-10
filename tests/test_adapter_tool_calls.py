@@ -17,7 +17,7 @@ import pytest
 from mewcode.engine.adapters.custom_adapter import CustomAdapter
 from mewcode.engine.adapters.openai_adapter import OpenAIAdapter
 from mewcode.engine.adapters._openai_protocol import OpenAIToolCallAggregator
-from mewcode.engine.models import Message, MessageRole
+from mewcode.engine.models import Message, MessageRole, TokenUsage
 
 
 # ----- helpers --------------------------------------------------------------
@@ -146,6 +146,31 @@ class TestOpenAIStreamingToolCalls:
         text = "".join(c.content for c in chunks)
         assert "Hello world" in text
         assert all(c.tool_calls is None for c in chunks)
+        assert all(c.token_usage is None for c in chunks)
+
+    @pytest.mark.asyncio
+    async def test_streaming_usage_requested_and_parsed(self, adapter_factory):
+        adapter = adapter_factory()
+        sse = [
+            _sse('{"choices":[{"delta":{"content":"Hello"}}]}'),
+            _sse('{"choices":[{"delta":{},"finish_reason":"stop"}]}'),
+            _sse('{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}'),
+            b"data: [DONE]\n",
+        ]
+        captured: dict = {}
+        _install_fake_stream(adapter, sse, captured=captured)
+
+        chunks = []
+        async for ch in adapter.chat_stream(
+            [Message(role=MessageRole.USER, content="hi")]
+        ):
+            chunks.append(ch)
+
+        usage_chunks = [c for c in chunks if c.token_usage is not None]
+        assert captured["payload"]["stream_options"]["include_usage"] is True
+        assert [c.token_usage for c in usage_chunks] == [
+            TokenUsage(prompt_tokens=10, completion_tokens=20, total_tokens=30)
+        ]
 
     @pytest.mark.asyncio
     async def test_streamed_tool_call_aggregation(self, adapter_factory):
@@ -274,3 +299,4 @@ class TestOpenAIStreamingToolCalls:
         ):
             pass
         assert "tools" not in captured["payload"]
+        assert captured["payload"]["stream_options"]["include_usage"] is True

@@ -16,7 +16,7 @@ from ..engine.adapters.claude_adapter import ClaudeAdapter
 from ..engine.conversation import ConversationManager
 from ..engine.agent import run_agent_loop
 from ..engine.agent_events import AgentEventType, AgentStopReason
-from ..engine.models import Message, MessageRole
+from ..engine.models import Message, MessageRole, TokenUsage
 from ..engine.tools import (
     ToolContext,
     build_default_registry,
@@ -39,7 +39,7 @@ class MewCodeApp(App):
     #chat-area {
         height: 1fr;
         border: solid $primary;
-        margin: 0 1;
+        margin: 0 1 0 1;
     }
 
     #chat-scroll {
@@ -58,11 +58,17 @@ class MewCodeApp(App):
         padding: 0 1;
     }
 
+    #main-layout {
+        height: 1fr;
+    }
+
     #input-box {
-        height: auto;
-        max-height: 10;
+        height: 4;
+        min-height: 4;
+        max-height: 4;
         border: solid $primary;
-        margin: 0 1;
+        margin: 1 1 0 1;
+        padding: 0 1;
     }
 
     #input-field {
@@ -71,11 +77,19 @@ class MewCodeApp(App):
 
     #prompt {
         background: $surface;
+        width: 4;
     }
 
     #status-bar {
-        height: auto;
-        dock: bottom;
+        height: 1;
+        min-height: 1;
+        margin: 0 1;
+        background: $surface;
+    }
+
+    #status-label {
+        height: 1;
+        width: 100%;
     }
     """
 
@@ -114,14 +128,19 @@ class MewCodeApp(App):
             [t.name for t in self.tool_registry.list_enabled()],
         )
 
+    @staticmethod
+    def _has_usage(usage: TokenUsage) -> bool:
+        return bool(usage.prompt_tokens or usage.completion_tokens or usage.total_tokens)
+
     def compose(self) -> ComposeResult:
         """Compose the TUI layout"""
         yield Header()
         yield Vertical(
             ChatArea(id="chat-area"),
             InputBox(id="input-box"),
+            StatusBar(id="status-bar"),
+            id="main-layout",
         )
-        yield StatusBar(id="status-bar")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -216,6 +235,7 @@ class MewCodeApp(App):
 
         if self.is_processing:
             logger.warning("Already processing, skipping message")
+            self.notify("A request is already running. Press Esc to cancel it.")
             return
 
         chat_area = self.query_one("#chat-area", ChatArea)
@@ -228,9 +248,13 @@ class MewCodeApp(App):
         user_message = Message(role=MessageRole.USER, content=content)
         self.conversation_manager.add_message(user_message)
 
-        # Update token usage
+        # Update restored nonzero token usage without inventing a zero value.
         token_usage = self.conversation_manager.get_token_usage()
-        status_bar.update_token_usage(token_usage.total_tokens, 0)
+        api_metrics = self.conversation_manager.get_api_metrics()
+        if self._has_usage(token_usage) or api_metrics.usage_call_count > 0:
+            status_bar.update_token_usage(token_usage)
+        if api_metrics.api_call_count > 0:
+            status_bar.update_metrics(api_metrics)
 
         # Process with LLM using run_worker
         logger.info("Starting LLM worker...")
@@ -331,8 +355,14 @@ class MewCodeApp(App):
                         )
                     status_bar.update_agent_status("Thinking...")
 
-                elif event.event_type == AgentEventType.USAGE and event.usage:
-                    status_bar.update_token_usage(event.usage.total_tokens, 0)
+                elif event.event_type == AgentEventType.USAGE and event.usage is not None:
+                    status_bar.update_token_usage(event.usage)
+
+                elif (
+                    event.event_type == AgentEventType.METRICS
+                    and event.metrics_snapshot is not None
+                ):
+                    status_bar.update_metrics(event.metrics_snapshot)
 
                 elif event.event_type == AgentEventType.ERROR:
                     if is_streaming:

@@ -45,7 +45,7 @@ python -c "from mewcode.tui.app import run_app; run_app(model='mimo-v2.5-pro', p
 ├─────────────────────────────────────────────────────────────┤
 │  >>> 输入框                                                  │
 ├─────────────────────────────────────────────────────────────┤
-│  [mimo-v2.5-pro] [Tokens: 0/0] [00:00:00] [Idle] [Chat]   │
+│  [mimo-v2.5-pro] [Tokens: N/A] [Avg: N/A] [Idle] [Chat]   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -275,3 +275,14 @@ python -m pytest tests/ -v
 - 项目地址：E:\agent_class\project
 - 日志位置：~/.mewcode/logs/
 - 会话位置：~/.mewcode/sessions/
+## Token Metrics Status Bar
+
+The status bar shows real API metrics when the provider returns enough data:
+
+- `Tokens`: total token usage, with prompt/completion split on wide terminals.
+- `tok/s`: average output token speed.
+- `TTFT`: average first-token latency.
+- `Lat`: average total API latency.
+- `N/A`: displayed when usage or timing data is unavailable.
+
+Session YAML saves aggregate `api_metrics` and message-level `token_usage` when available.

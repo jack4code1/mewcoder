@@ -47,6 +47,22 @@ class TokenUsage:
             total_tokens=self.total_tokens + other.total_tokens,
         )
 
+    def to_dict(self) -> dict:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict]) -> "TokenUsage":
+        data = data or {}
+        return cls(
+            prompt_tokens=int(data.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(data.get("completion_tokens", 0) or 0),
+            total_tokens=int(data.get("total_tokens", 0) or 0),
+        )
+
 
 @dataclass
 class ToolCall:
@@ -115,6 +131,8 @@ class Message:
         }
         if self.metadata:
             result["metadata"] = self.metadata
+        if self.token_usage is not None:
+            result["token_usage"] = self.token_usage.to_dict()
         if self.tool_calls:
             result["tool_calls"] = [tc.to_dict() for tc in self.tool_calls]
         if self.tool_call_id is not None:
@@ -137,6 +155,11 @@ class Message:
             content=data.get("content", "") or "",
             timestamp=datetime.fromisoformat(
                 data.get("timestamp", datetime.now().isoformat())
+            ),
+            token_usage=(
+                TokenUsage.from_dict(data.get("token_usage"))
+                if data.get("token_usage") is not None
+                else None
             ),
             metadata=data.get("metadata", {}) or {},
             tool_calls=tool_calls,

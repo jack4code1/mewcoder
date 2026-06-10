@@ -94,6 +94,7 @@ async def test_terminal_no_tool_response():
 
     assert [e.event_type for e in events] == [
         AgentEventType.STREAM_TEXT,
+        AgentEventType.METRICS,
         AgentEventType.TURN_COMPLETE,
         AgentEventType.LOOP_COMPLETE,
     ]

@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## V0.6 - 2026-06-10 - Codex
+
+### Token metrics and status bar - 05-token-metrics
+
+Implemented the approved `specs/05-token-metrics/` plan.
+
+- Added engine metrics models for per-call API metrics and session aggregates.
+- Added Agent Loop timing for TTFT, total latency, and average output speed in `tok/s`.
+- Kept token usage unavailable as `N/A` instead of displaying fake zero values.
+- Added OpenAI-compatible streaming usage requests with `stream_options.include_usage`.
+- Normalized streaming usage for OpenAI, Custom, Claude, and Ollama adapters.
+- Persisted message-level `token_usage` and aggregate `api_metrics` to session YAML.
+- Updated the TUI status bar to show real token totals, prompt/completion split, average `tok/s`, TTFT, and latency.
+- Added compact status bar formatting for narrow terminal widths.
+- Added tests for metrics math, event payloads, Agent Loop timing, adapter usage parsing, persistence, status bar formatting, and TUI integration.
+
 本文件记录版本变更，供 coding agent 快速了解项目演进和代码修改范围。
 
 ---

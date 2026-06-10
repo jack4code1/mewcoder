@@ -48,10 +48,22 @@ class OllamaAdapter(LLMClient):
         data = response.json()
 
         usage = data.get("usage", {})
+        prompt_tokens = int(
+            data.get("prompt_eval_count", usage.get("prompt_tokens", 0)) or 0
+        )
+        completion_tokens = int(
+            data.get("eval_count", usage.get("completion_tokens", 0)) or 0
+        )
+        raw_total = usage.get("total_tokens")
+        total_tokens = (
+            int(raw_total)
+            if raw_total is not None
+            else prompt_tokens + completion_tokens
+        )
         token_usage = TokenUsage(
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-            total_tokens=usage.get("total_tokens", 0),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
         )
 
         msg = data.get("message", {}) or {}
@@ -162,7 +174,6 @@ class OllamaAdapter(LLMClient):
                                 content=content,
                                 model=data.get("model", self.model),
                                 finish_reason="stop" if done else None,
-                                token_usage=token_usage,
                             )
 
                         if done and agg.has_calls():

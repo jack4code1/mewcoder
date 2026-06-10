@@ -177,6 +177,7 @@ class ClaudeAdapter(LLMClient):
         #                     "partial_json": "..."} for tool_use blocks.
         block_buf: dict[int, dict] = {}
         completed_tool_calls: list[ToolCall] = []
+        last_output_tokens = 0
 
         async with self.client.stream("POST", "/v1/messages", json=payload) as response:
             response.raise_for_status()
@@ -208,16 +209,18 @@ class ClaudeAdapter(LLMClient):
                     if event_type == "message_start":
                         message = data.get("message", {})
                         usage = message.get("usage", {})
-                        token_usage = TokenUsage(
-                            prompt_tokens=usage.get("input_tokens", 0),
-                            completion_tokens=0,
-                            total_tokens=usage.get("input_tokens", 0),
-                        )
-                        yield StreamChunk(
-                            content="",
-                            model=message.get("model", self.model),
-                            token_usage=token_usage,
-                        )
+                        if "input_tokens" in usage:
+                            input_tokens = int(usage.get("input_tokens", 0) or 0)
+                            token_usage = TokenUsage(
+                                prompt_tokens=input_tokens,
+                                completion_tokens=0,
+                                total_tokens=input_tokens,
+                            )
+                            yield StreamChunk(
+                                content="",
+                                model=message.get("model", self.model),
+                                token_usage=token_usage,
+                            )
 
                     elif event_type == "content_block_start":
                         idx = data.get("index", 0)
@@ -275,11 +278,16 @@ class ClaudeAdapter(LLMClient):
                     elif event_type == "message_delta":
                         stop_reason = data.get("delta", {}).get("stop_reason")
                         usage = data.get("usage", {})
-                        token_usage = TokenUsage(
-                            prompt_tokens=0,
-                            completion_tokens=usage.get("output_tokens", 0),
-                            total_tokens=usage.get("output_tokens", 0),
-                        )
+                        token_usage = None
+                        if "output_tokens" in usage:
+                            output_tokens = int(usage.get("output_tokens", 0) or 0)
+                            output_delta = max(0, output_tokens - last_output_tokens)
+                            last_output_tokens = max(last_output_tokens, output_tokens)
+                            token_usage = TokenUsage(
+                                prompt_tokens=0,
+                                completion_tokens=output_delta,
+                                total_tokens=output_delta,
+                            )
                         # Defer emitting tool_calls until message_stop so the
                         # consumer sees a single terminal chunk.
                         if completed_tool_calls and stop_reason == "tool_use":

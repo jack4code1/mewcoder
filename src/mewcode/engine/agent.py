@@ -10,6 +10,7 @@ from typing import AsyncIterator, Callable, Optional
 from .agent_events import AgentEvent, AgentStopReason
 from .conversation import ConversationManager
 from .models.client import LLMClient
+from .models.metrics import ApiCallMetrics, MetricsAggregate, MetricsSnapshot
 from .models.message import Message, MessageRole, TokenUsage, ToolCall
 from .tools import ToolRegistry, ToolResult
 
@@ -114,6 +115,28 @@ def _has_usage(usage: TokenUsage) -> bool:
     return bool(usage.prompt_tokens or usage.completion_tokens or usage.total_tokens)
 
 
+def _metrics_snapshot(
+    conversation_manager: ConversationManager,
+    last_call: Optional[ApiCallMetrics] = None,
+) -> MetricsSnapshot:
+    aggregate = MetricsAggregate.from_dict(
+        conversation_manager.get_api_metrics().to_dict()
+    )
+    usage = conversation_manager.get_token_usage()
+    visible_usage = None
+    if _has_usage(usage) or aggregate.usage_call_count > 0:
+        visible_usage = TokenUsage(
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+        )
+    return MetricsSnapshot(
+        token_usage=visible_usage,
+        api_metrics=aggregate,
+        last_call=last_call,
+    )
+
+
 async def run_agent_loop(
     *,
     llm_client: LLMClient,
@@ -125,13 +148,14 @@ async def run_agent_loop(
     invalid_tool_limit: int = 3,
     max_concurrency: int = 4,
     cancel_event: Optional[asyncio.Event] = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> AsyncIterator[AgentEvent]:
     """Run the ReAct loop and emit progress events.
 
     The caller is responsible for adding the user message before invoking the
     loop. This function owns assistant/tool message persistence afterwards.
     """
-    total_usage = TokenUsage()
+    total_usage = conversation_manager.get_token_usage()
     consecutive_invalid_tools = 0
 
     for turn_index in range(1, max_iterations + 1):
@@ -142,6 +166,9 @@ async def run_agent_loop(
         assistant_text = ""
         pending_tool_calls: list[ToolCall] = []
         turn_usage = TokenUsage()
+        usage_seen = False
+        request_started_at = clock()
+        first_token_at: Optional[float] = None
 
         try:
             async for chunk in llm_client.chat_stream(
@@ -153,14 +180,18 @@ async def run_agent_loop(
                     )
                     return
                 if chunk.content:
+                    if first_token_at is None:
+                        first_token_at = clock()
                     assistant_text += chunk.content
                     yield AgentEvent.stream_text(chunk.content)
-                if chunk.token_usage:
+                if chunk.token_usage is not None:
+                    usage_seen = True
                     turn_usage = turn_usage + chunk.token_usage
                     total_usage = total_usage + chunk.token_usage
                     yield AgentEvent.usage(total_usage)
                 if chunk.tool_calls:
                     pending_tool_calls = list(chunk.tool_calls)
+            request_completed_at = clock()
         except asyncio.CancelledError:
             yield AgentEvent.loop_complete(turn_index - 1, AgentStopReason.CANCELLED)
             return
@@ -174,9 +205,17 @@ async def run_agent_loop(
                 role=MessageRole.ASSISTANT,
                 content=assistant_text,
                 tool_calls=pending_tool_calls or None,
-                token_usage=turn_usage if _has_usage(turn_usage) else None,
+                token_usage=turn_usage if usage_seen else None,
             )
         )
+        call_metrics = ApiCallMetrics.from_timing(
+            usage=turn_usage if usage_seen else None,
+            started_at=request_started_at,
+            completed_at=request_completed_at,
+            first_token_at=first_token_at,
+        )
+        conversation_manager.add_api_call_metrics(call_metrics)
+        yield AgentEvent.metrics(_metrics_snapshot(conversation_manager, call_metrics))
         yield AgentEvent.turn_complete(turn_index)
 
         if not pending_tool_calls:

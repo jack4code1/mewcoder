@@ -7,7 +7,12 @@ import httpx
 
 from ..models.client import LLMClient
 from ..models.message import LLMResponse, Message, MessageRole, StreamChunk, ToolCall, TokenUsage
-from ._openai_protocol import OpenAIToolCallAggregator, convert_messages_to_openai
+from ._openai_protocol import (
+    OpenAIToolCallAggregator,
+    add_stream_usage_option,
+    convert_messages_to_openai,
+    token_usage_from_openai_usage,
+)
 
 
 class OpenAIAdapter(LLMClient):
@@ -52,11 +57,7 @@ class OpenAIAdapter(LLMClient):
         data = response.json()
 
         usage = data.get("usage", {})
-        token_usage = TokenUsage(
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-            total_tokens=usage.get("total_tokens", 0),
-        )
+        token_usage = token_usage_from_openai_usage(usage)
 
         choice = data["choices"][0]
         message = choice.get("message", {})
@@ -103,6 +104,7 @@ class OpenAIAdapter(LLMClient):
         }
         if tools:
             payload["tools"] = tools
+        add_stream_usage_option(payload)
 
         agg = OpenAIToolCallAggregator()
 
@@ -120,30 +122,35 @@ class OpenAIAdapter(LLMClient):
                     if line.startswith("data: "):
                         try:
                             data = json.loads(line[6:])
-                            delta = data["choices"][0].get("delta", {})
+                            choices = data.get("choices") or []
+                            token_usage = None
+                            if data.get("usage") is not None:
+                                token_usage = token_usage_from_openai_usage(data["usage"])
+
+                            if not choices:
+                                if token_usage is not None:
+                                    yield StreamChunk(
+                                        content="",
+                                        model=data.get("model", self.model),
+                                        token_usage=token_usage,
+                                    )
+                                continue
+
+                            choice = choices[0]
+                            delta = choice.get("delta", {})
 
                             tc_deltas = delta.get("tool_calls")
                             if tc_deltas:
                                 agg.feed(tc_deltas)
 
                             content = delta.get("content", "") or ""
-                            finish_reason = data["choices"][0].get("finish_reason")
-
-                            token_usage = None
-                            if finish_reason and "usage" in data:
-                                usage = data["usage"]
-                                token_usage = TokenUsage(
-                                    prompt_tokens=usage.get("prompt_tokens", 0),
-                                    completion_tokens=usage.get("completion_tokens", 0),
-                                    total_tokens=usage.get("total_tokens", 0),
-                                )
+                            finish_reason = choice.get("finish_reason")
 
                             if content or finish_reason is None:
                                 yield StreamChunk(
                                     content=content,
                                     model=data.get("model", self.model),
                                     finish_reason=finish_reason,
-                                    token_usage=token_usage,
                                 )
 
                             if finish_reason and agg.has_calls():

@@ -7,6 +7,7 @@ from typing import Optional
 
 import yaml
 
+from .models.metrics import ApiCallMetrics, MetricsAggregate
 from .models.message import Message, MessageRole, TokenUsage
 
 
@@ -20,6 +21,7 @@ class Conversation:
         self.created_at = datetime.now()
         self.updated_at = datetime.now()
         self.total_token_usage = TokenUsage()
+        self.api_metrics = MetricsAggregate()
 
     def add_message(self, message: Message) -> None:
         """添加消息"""
@@ -28,6 +30,11 @@ class Conversation:
 
         if message.token_usage:
             self.total_token_usage = self.total_token_usage + message.token_usage
+
+    def add_api_call_metrics(self, metrics: ApiCallMetrics) -> None:
+        """Add one completed API call to the aggregate metrics."""
+        self.api_metrics.add_call(metrics)
+        self.updated_at = datetime.now()
 
     def get_messages(self, limit: Optional[int] = None) -> list[Message]:
         """获取消息列表"""
@@ -39,6 +46,7 @@ class Conversation:
         """清空消息"""
         self.messages = []
         self.total_token_usage = TokenUsage()
+        self.api_metrics = MetricsAggregate()
         self.updated_at = datetime.now()
 
     def to_dict(self) -> dict:
@@ -54,6 +62,7 @@ class Conversation:
                 "completion_tokens": self.total_token_usage.completion_tokens,
                 "total_tokens": self.total_token_usage.total_tokens,
             },
+            "api_metrics": self.api_metrics.to_dict(),
         }
 
     @classmethod
@@ -69,6 +78,7 @@ class Conversation:
             completion_tokens=usage.get("completion_tokens", 0),
             total_tokens=usage.get("total_tokens", 0),
         )
+        conv.api_metrics = MetricsAggregate.from_dict(data.get("api_metrics"))
 
         for msg_data in data.get("messages", []):
             conv.messages.append(Message.from_dict(msg_data))
@@ -189,3 +199,20 @@ class ConversationManager:
         if conv_id and conv_id in self.conversations:
             return self.conversations[conv_id].total_token_usage
         return TokenUsage()
+
+    def add_api_call_metrics(
+        self, metrics: ApiCallMetrics, conversation_id: Optional[str] = None
+    ) -> None:
+        """Add API metrics to the active or specified conversation."""
+        conv_id = conversation_id or self.active_conversation_id
+        if conv_id and conv_id in self.conversations:
+            self.conversations[conv_id].add_api_call_metrics(metrics)
+
+    def get_api_metrics(
+        self, conversation_id: Optional[str] = None
+    ) -> MetricsAggregate:
+        """Get aggregate API metrics for the active or specified conversation."""
+        conv_id = conversation_id or self.active_conversation_id
+        if conv_id and conv_id in self.conversations:
+            return self.conversations[conv_id].api_metrics
+        return MetricsAggregate()

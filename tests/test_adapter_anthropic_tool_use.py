@@ -13,7 +13,7 @@ from typing import Iterable
 import pytest
 
 from mewcode.engine.adapters.claude_adapter import ClaudeAdapter
-from mewcode.engine.models import Message, MessageRole
+from mewcode.engine.models import Message, MessageRole, TokenUsage
 
 
 class _FakeStreamResponse:
@@ -74,6 +74,41 @@ class TestAnthropicStreamingTextOnly:
         text = "".join(c.content for c in chunks)
         assert "Hello world" in text
         assert all(c.tool_calls is None for c in chunks)
+        usage = [c.token_usage for c in chunks if c.token_usage is not None]
+        assert usage == [
+            TokenUsage(prompt_tokens=10, completion_tokens=0, total_tokens=10),
+            TokenUsage(prompt_tokens=0, completion_tokens=5, total_tokens=5),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_cumulative_output_usage_is_counted_as_delta(self, adapter):
+        sse = [
+            _sse("message_start", '{"type":"message_start","message":{"model":"claude","usage":{"input_tokens":10}}}'),
+            _sse("content_block_start", '{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}'),
+            _sse("content_block_delta", '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}'),
+            _sse("content_block_stop", '{"type":"content_block_stop","index":0}'),
+            _sse("message_delta", '{"type":"message_delta","delta":{},"usage":{"output_tokens":5}}'),
+            _sse("message_delta", '{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}'),
+            _sse("message_stop", '{"type":"message_stop"}'),
+        ]
+        _install_fake_stream(adapter, sse)
+
+        chunks = []
+        async for ch in adapter.chat_stream(
+            [Message(role=MessageRole.USER, content="hi")]
+        ):
+            chunks.append(ch)
+
+        total = TokenUsage()
+        for chunk in chunks:
+            if chunk.token_usage is not None:
+                total = total + chunk.token_usage
+
+        assert total == TokenUsage(
+            prompt_tokens=10,
+            completion_tokens=7,
+            total_tokens=17,
+        )
 
 
 class TestAnthropicStreamingToolUse:

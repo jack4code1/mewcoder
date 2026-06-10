@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
+from .models.metrics import ApiCallMetrics, MetricsSnapshot
 from .models.message import TokenUsage
 
 
@@ -18,6 +19,7 @@ class AgentEventType(str, Enum):
     TURN_COMPLETE = "turn_complete"
     LOOP_COMPLETE = "loop_complete"
     USAGE = "usage"
+    METRICS = "metrics"
     ERROR = "error"
 
 
@@ -52,6 +54,8 @@ class AgentEvent:
     total_turns: Optional[int] = None
     stop_reason: Optional[AgentStopReason] = None
     usage: Optional[TokenUsage] = None
+    metrics_snapshot: Optional[MetricsSnapshot] = None
+    api_call_metrics: Optional[ApiCallMetrics] = None
     message: str = ""
 
     @classmethod
@@ -110,6 +114,15 @@ class AgentEvent:
     @classmethod
     def usage(cls, usage: TokenUsage) -> "AgentEvent":
         return cls(event_type=AgentEventType.USAGE, usage=usage)
+
+    @classmethod
+    def metrics(cls, snapshot: MetricsSnapshot) -> "AgentEvent":
+        return cls(
+            event_type=AgentEventType.METRICS,
+            usage=snapshot.token_usage,
+            metrics_snapshot=snapshot,
+            api_call_metrics=snapshot.last_call,
+        )
 
     @classmethod
     def error(cls, message: str) -> "AgentEvent":

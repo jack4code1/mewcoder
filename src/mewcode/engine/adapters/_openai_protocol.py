@@ -26,7 +26,33 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..models.message import Message, MessageRole, ToolCall
+from ..models.message import Message, MessageRole, TokenUsage, ToolCall
+
+
+def add_stream_usage_option(payload: dict[str, Any]) -> None:
+    """Request final streaming usage for OpenAI-compatible endpoints."""
+    stream_options = payload.get("stream_options")
+    if stream_options is None:
+        payload["stream_options"] = {"include_usage": True}
+    elif isinstance(stream_options, dict):
+        stream_options.setdefault("include_usage", True)
+
+
+def token_usage_from_openai_usage(usage: dict[str, Any]) -> TokenUsage:
+    """Normalize an OpenAI-compatible usage object."""
+    prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+    completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+    raw_total = usage.get("total_tokens")
+    total_tokens = (
+        int(raw_total)
+        if raw_total is not None
+        else prompt_tokens + completion_tokens
+    )
+    return TokenUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
 
 
 def convert_messages_to_openai(messages: list[Message]) -> list[dict[str, Any]]:

@@ -1,5 +1,17 @@
 # MewCode
 
+## Token Metrics
+
+The status bar displays real provider token usage when the adapter receives it:
+
+- total tokens, with prompt/completion split on wide terminals.
+- average output speed in `tok/s`.
+- average first-token latency as `TTFT`.
+- average total API latency as `Lat`.
+- `N/A` when a provider or endpoint does not return usage or a metric cannot be calculated.
+
+Metrics are persisted in session YAML as aggregate `api_metrics`, and message-level `token_usage` is saved when available.
+
 一个支持多种 LLM 的终端 AI 编程助手。
 
 ## 项目简介
