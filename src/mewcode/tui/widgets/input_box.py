@@ -29,6 +29,7 @@ class InputBox(Widget):
         yield Horizontal(
             Label(">>> ", id="prompt"),
             Input(placeholder="Type your message...", id="input-field"),
+            id="input-row",
         )
 
     def on_mount(self) -> None:
@@ -41,6 +42,12 @@ class InputBox(Widget):
         """Handle Enter from the focused child Input."""
         event.stop()
         self.action_submit()
+
+    @on(Input.Changed, "#input-field")
+    def _on_text_input_changed(self, event: Input.Changed) -> None:
+        """Broadcast whether the input currently has non-empty content."""
+        has_content = bool(event.value.strip())
+        self.post_message(InputContentChanged(has_content))
 
     def on_key(self, event: Key) -> None:
         """Handle prompt history keys while the child Input is focused."""
@@ -121,6 +128,21 @@ class InputSubmitted(Message):
     def __init__(self, value: str) -> None:
         super().__init__()
         self.value = value
+
+
+class InputContentChanged(Message):
+    """Message posted when the input content changes.
+
+    Carries whether the input box currently holds non-empty content, used by
+    the app to show/hide the status bar above the input box.
+
+    Named distinctly from Textual's ``Input.Changed`` to avoid the
+    ``on_input_changed`` handler-name collision on the parent App.
+    """
+
+    def __init__(self, has_content: bool) -> None:
+        super().__init__()
+        self.has_content = has_content
 
 
 class TabPressed(Message):

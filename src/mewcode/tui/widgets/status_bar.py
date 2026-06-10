@@ -23,6 +23,7 @@ class StatusBar(Widget):
     working_dir: reactive[str] = reactive("")
     agent_status: reactive[str] = reactive("Idle")
     mode: reactive[str] = reactive("Chat")
+    is_visible: reactive[bool] = reactive(False)
 
     def __init__(self, id: str = None):
         super().__init__(id=id)
@@ -213,3 +214,17 @@ class StatusBar(Widget):
         """Update mode."""
         self.mode = mode
         self._update_display()
+
+    def show(self) -> None:
+        """Make the status bar visible (occupies a row above the input)."""
+        self.is_visible = True
+        self.remove_class("hidden")
+
+    def hide(self) -> None:
+        """Hide the status bar without occupying layout space.
+
+        Content updates continue while hidden, so re-showing reflects the
+        latest values.
+        """
+        self.is_visible = False
+        self.add_class("hidden")

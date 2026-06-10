@@ -1,5 +1,12 @@
 # MewCode
 
+## UI Layout Note
+
+The TUI keeps the chat area as the primary `1fr` region. The status bar sits
+above the input and is shown only while the input contains text. The input box
+is a compact single-line control with bounded height, so assistant output,
+system messages, and tool traces remain visible in the chat area.
+
 ## Token Metrics
 
 The status bar displays real provider token usage when the adapter receives it:
@@ -42,8 +49,9 @@ MewCode 是一个轻量级的终端 AI 编程助手，支持多种大语言模�
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │  Textual 框架                                         │  │
 │  │  - ChatArea: 对话区域（Markdown 渲染、流式显示）      │  │
-│  │  - InputBox: 输入框（历史命令、命令补全）             │  │
-│  │  - StatusBar: 状态栏（模型、Token、时长）             │  │
+│  │  - StatusBar: 状态栏（模型、Token、时长，位于输入框   │  │
+│  │    上方，输入时显示、无输入时隐藏）                    │  │
+│  │  - InputBox: 输入框（历史命令、命令补全，至少一行）    │  │
 │  └───────────────────────────────────────────────────────┘  │
 ├─────────────────────────────────────────────────────────────┤
 │  引擎层 (Engine)                                            │
@@ -96,7 +104,7 @@ MewCode 是一个轻量级的终端 AI 编程助手，支持多种大语言模�
 |------|------|------|
 | ChatArea | `tui/widgets/chat_area.py` | 对话区域，支持 Markdown 渲染和流式显示 |
 | InputBox | `tui/widgets/input_box.py` | 输入框，支持历史命令、命令补全 |
-| StatusBar | `tui/widgets/status_bar.py` | 状态栏，显示模型、Token、会话时长等信息 |
+| StatusBar | `tui/widgets/status_bar.py` | 状态栏，位于输入框上方；输入时显示模型、Token、会话时长等信息，无输入时隐藏且不占布局空间 |
 | MewCodeApp | `tui/app.py` | 主应用，管理组件生命周期和事件处理 |
 
 #### 2. 引擎层 (Engine)

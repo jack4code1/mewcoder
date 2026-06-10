@@ -43,11 +43,12 @@ python -c "from mewcode.tui.app import run_app; run_app(model='mimo-v2.5-pro', p
 │  - 支持 Markdown 渲染                                       │
 │                                                             │
 ├─────────────────────────────────────────────────────────────┤
-│  >>> 输入框                                                  │
-├─────────────────────────────────────────────────────────────┤
-│  [mimo-v2.5-pro] [Tokens: N/A] [Avg: N/A] [Idle] [Chat]   │
+│  [mimo-v2.5-pro] [Tokens: N/A] [Avg: N/A] [Idle] [Chat]   │  ← 状态栏，仅在输入时显示
+│  >>> 输入框                                                  │  ← 至少一行
 └─────────────────────────────────────────────────────────────┘
 ```
+
+> 状态栏位于输入框正上方：输入框有内容时显示，输入框为空（含提交后、流式刷新期间）时隐藏，隐藏时不占布局空间，由对话区回收。输入框在任何终端尺寸下至少完整显示一行。
 
 ---
 
@@ -275,6 +276,13 @@ python -m pytest tests/ -v
 - 项目地址：E:\agent_class\project
 - 日志位置：~/.mewcode/logs/
 - 会话位置：~/.mewcode/sessions/
+## UI Layout Note
+
+The chat area is always the main visible region. The status bar appears above
+the input only while there is draft text, and the input box stays compact as a
+single-line control. If the terminal is resized, the input must not expand to
+hide assistant output or tool traces.
+
 ## Token Metrics Status Bar
 
 The status bar shows real API metrics when the provider returns enough data:

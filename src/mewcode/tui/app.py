@@ -24,7 +24,7 @@ from ..engine.tools import (
 )
 from ..logger import logger
 from .widgets.chat_area import ChatArea
-from .widgets.input_box import InputBox, InputSubmitted, TabPressed
+from .widgets.input_box import InputBox, InputContentChanged, InputSubmitted, TabPressed
 from .widgets.status_bar import StatusBar
 
 
@@ -38,6 +38,7 @@ class MewCodeApp(App):
 
     #chat-area {
         height: 1fr;
+        min-height: 3;
         border: solid $primary;
         margin: 0 1 0 1;
     }
@@ -63,9 +64,9 @@ class MewCodeApp(App):
     }
 
     #input-box {
-        height: 4;
-        min-height: 4;
-        max-height: 4;
+        height: 5;
+        min-height: 3;
+        max-height: 5;
         border: solid $primary;
         margin: 1 1 0 1;
         padding: 0 1;
@@ -78,6 +79,8 @@ class MewCodeApp(App):
     #prompt {
         background: $surface;
         width: 4;
+        height: 3;
+        content-align: left middle;
     }
 
     #status-bar {
@@ -85,6 +88,10 @@ class MewCodeApp(App):
         min-height: 1;
         margin: 0 1;
         background: $surface;
+    }
+
+    #status-bar.hidden {
+        display: none;
     }
 
     #status-label {
@@ -137,8 +144,8 @@ class MewCodeApp(App):
         yield Header()
         yield Vertical(
             ChatArea(id="chat-area"),
-            InputBox(id="input-box"),
             StatusBar(id="status-bar"),
+            InputBox(id="input-box"),
             id="main-layout",
         )
         yield Footer()
@@ -157,6 +164,9 @@ class MewCodeApp(App):
         chat_area = self.query_one("#chat-area", ChatArea)
         chat_area.add_system_message("Welcome to MewCode! Type your message or /help for commands.")
 
+        # Input is empty at startup -> status bar hidden until the user types.
+        status_bar.hide()
+
     async def on_unmount(self) -> None:
         """App closing — release LLM client resources"""
         if self.llm_client is not None:
@@ -174,6 +184,14 @@ class MewCodeApp(App):
             self._handle_command(value)
         else:
             self._handle_message(value)
+
+    def on_input_content_changed(self, event: InputContentChanged) -> None:
+        """Show the status bar while the user is typing, hide it when empty."""
+        status_bar = self.query_one("#status-bar", StatusBar)
+        if event.has_content:
+            status_bar.show()
+        else:
+            status_bar.hide()
 
     def on_tab_pressed(self, event: TabPressed) -> None:
         """Handle tab press for prompt optimization"""

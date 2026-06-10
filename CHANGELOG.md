@@ -1,5 +1,51 @@
 # CHANGELOG
 
+## V0.7.1 - 2026-06-11 - Codex
+
+### UI layout regression fix - 06.1-ui-fix
+
+Implemented the approved `specs/06.1-ui-fix/` V6.1 recovery plan.
+
+- Fixed the layout regression where `InputBox` expanded through the main `Vertical` layout and collapsed `ChatArea` to height `0`.
+- Constrained `InputBox` to a compact bounded height and added a stable `#input-row` container for the single-line input.
+- Added a minimum height guard for `ChatArea` so assistant output, user messages, system messages, and tool traces remain visible.
+- Kept the V6 status bar behavior: visible only while the input has content, hidden with `display: none` when empty.
+- Removed inner `Input` row height constraints that clipped the Textual input render area; typed text is now covered by screenshot-based regression testing.
+- Added regression tests for desktop, medium, and small terminal sizes to assert `ChatArea` stays visible and `InputBox` remains compact.
+- Added output visibility coverage for startup system messages, streaming assistant output, and submitted user messages.
+
+---
+
+## V0.7 - 2026-06-10 - Claude
+
+### UI 界面重构 - 06-ui-redesign
+
+实现 `specs/06-ui-redesign/` 四份文档批准后的 TUI 布局重构。
+
+- 调整布局顺序：状态栏从屏幕底部移到输入框正上方（Header → ChatArea → StatusBar → InputBox → Footer）。
+- 状态栏改为按输入内容条件显隐：输入框非空时显示，为空（含提交后、流式刷新期间）时隐藏。
+- 显隐由单一信号驱动：`InputBox` 监听子 `Input.Changed`，广播新增的 `InputContentChanged(has_content)` 消息，`MewCodeApp.on_input_content_changed` 据此 `show()`/`hide()` 状态栏。
+- `InputContentChanged` 刻意区别于 Textual 内置 `Input.Changed`，避免 `on_input_changed` 处理器名冲突。
+- 状态栏隐藏用 `.hidden { display: none }`，折叠为 0 高度不占布局空间，对话区回收该空间。
+- 状态栏隐藏期间内容反应式属性照常更新，再次显示即反映最新 token/状态值。
+- 输入框移除 `max-height: 4` 裁切约束，改用 `min-height: 3`（边框 + 至少一行）+ `height: auto`，保证任何终端尺寸至少一行可见。
+- `on_mount` 启动时输入框为空 → 状态栏初始隐藏。
+- 仅改动 TUI 表现层，引擎层 / Agent Loop / 工具层 / 会话持久化无改动。
+
+**新增/扩展测试**
+
+- `tests/test_tui_ui_layout.py`（新增）— 布局顺序、启动隐藏、打字显示、清空隐藏、提交清空且隐藏、输入框至少一行、隐藏时对话区更高。
+- `tests/test_input_box.py` — 扩展：打字广播 `has_content=True`、清空广播 `False`、提交后广播 `False`。
+- `tests/test_status_bar_metrics.py` — 扩展：隐藏期间内容仍更新、再次显示反映最新值。
+
+**文档**
+
+- `README.md` / `MANUAL.md` — 更新布局说明：状态栏移到输入框上方、按输入显隐、输入框至少一行。
+
+本文件记录版本变更，供 coding agent 快速了解项目演进和代码修改范围。
+
+---
+
 ## V0.6 - 2026-06-10 - Codex
 
 ### Token metrics and status bar - 05-token-metrics

@@ -72,3 +72,21 @@ def test_status_bar_narrow_format_hides_working_dir():
     assert "18.6 tok/s" in formatted
     assert "Idle" in formatted
     assert "very\\long" not in formatted
+
+
+def test_status_bar_updates_content_while_hidden():
+    bar = StatusBar()
+    bar.hide()
+    assert bar.is_visible is False
+
+    bar.update_token_usage(
+        TokenUsage(prompt_tokens=5, completion_tokens=15, total_tokens=20)
+    )
+
+    # Content reactive updates even while hidden, so re-showing is current.
+    assert bar.token_usage == "20 P:5 C:15"
+
+    bar.show()
+    assert bar.is_visible is True
+    assert "20 P:5 C:15" in bar._format_status(width=160)
+
