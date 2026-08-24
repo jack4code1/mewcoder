@@ -8,6 +8,24 @@ import yaml
 
 
 _DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "config.yaml"
+_LOCAL_CONFIG_SUFFIX = ".local.yaml"
+
+
+def _merge_config(base: dict, override: dict) -> dict:
+    """Return a recursive merge without mutating either input mapping."""
+    merged = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _merge_config(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_yaml(config_path: Path) -> dict:
+    with open(config_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
 def load_config(path: Optional[str] = None) -> dict:
@@ -15,8 +33,14 @@ def load_config(path: Optional[str] = None) -> dict:
     config_path = Path(path) if path else _DEFAULT_CONFIG_PATH
     if not config_path.exists():
         return {}
-    with open(config_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    config = _load_yaml(config_path)
+
+    if path is None:
+        local_path = config_path.with_suffix(_LOCAL_CONFIG_SUFFIX)
+        if local_path.exists():
+            config = _merge_config(config, _load_yaml(local_path))
+
+    return config
 
 
 def get_model_config(config: dict, model: str) -> dict[str, Any]:
@@ -36,6 +60,23 @@ _DEFAULT_TOOLS_CONFIG = {
     "bash_timeout": 30,
     "max_output_chars": 10000,
 }
+
+_DEFAULT_SECURITY_CONFIG = {
+    "enabled": False,
+    "approval_timeout_seconds": 300,
+}
+
+
+def get_security_config(config: dict) -> dict[str, Any]:
+    """Return validated security defaults without mutating loaded config."""
+    raw = (config or {}).get("security") or {}
+    merged = dict(_DEFAULT_SECURITY_CONFIG)
+    if isinstance(raw, dict):
+        merged.update({key: value for key, value in raw.items() if value is not None})
+    timeout = merged["approval_timeout_seconds"]
+    if not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise ValueError("security.approval_timeout_seconds must be positive")
+    return merged
 
 
 def get_tools_config(config: dict) -> dict[str, Any]:

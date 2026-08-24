@@ -16,6 +16,11 @@ from ..engine.adapters.claude_adapter import ClaudeAdapter
 from ..engine.conversation import ConversationManager
 from ..engine.agent import run_agent_loop
 from ..engine.agent_events import AgentEventType, AgentStopReason
+from ..engine.security.gateway import ExecutionGateway
+from ..engine.security.audit import AuditLog
+from ..engine.runtime import ProjectRuntime
+from ..engine.context import ContextItem, ProjectMemoryStore, plan_context
+from ..engine.context import MemoryRecord
 from ..engine.models import Message, MessageRole, TokenUsage
 from ..engine.tools import (
     ToolContext,
@@ -129,7 +134,16 @@ class MewCodeApp(App):
         self.tool_context: ToolContext = ToolContext.detect(
             working_dir=Path(os.getcwd())
         )
+        self.project_runtime = ProjectRuntime(self.tool_context.working_dir)
+        self.memory_store = ProjectMemoryStore(self.tool_context.working_dir)
         self.tool_registry = build_default_registry(self.tool_context, self.config)
+        self.execution_gateway = None
+        if self.config.get("security", {}).get("enabled", False):
+            self.execution_gateway = ExecutionGateway(
+                self.tool_registry, audit_log=AuditLog(self.tool_context.working_dir)
+            )
+            self.execution_gateway.grants.load_project(self.tool_context.working_dir)
+            self.execution_gateway.grants = self.project_runtime.permissions
         logger.info(
             "Tool registry initialised: %s",
             [t.name for t in self.tool_registry.list_enabled()],
@@ -208,7 +222,89 @@ class MewCodeApp(App):
         chat_area = self.query_one("#chat-area", ChatArea)
         command = command.lower().strip()
 
-        if command == "/help":
+        if command.startswith(("/approve", "/deny")) and self.execution_gateway is None:
+            chat_area.add_system_message("Security approvals are disabled for this project.")
+            return
+
+        if command.startswith("/approve "):
+            requested = command.removeprefix("/approve ").strip()
+            project_scope = requested.startswith("project ")
+            if project_scope:
+                requested = requested.removeprefix("project ").strip()
+            tool = next(
+                (item for item in self.tool_registry.list_enabled() if item.name.lower() == requested),
+                None,
+            )
+            if tool is None:
+                chat_area.add_system_message(f"No enabled tool named: {requested}")
+            else:
+                if project_scope:
+                    self.execution_gateway.grants.grant_project(tool.name)
+                    self.execution_gateway.grants.save_project(self.tool_context.working_dir)
+                else:
+                    self.execution_gateway.grants.grant(tool.name)
+                chat_area.add_system_message(
+                    f"Approved {tool.name} for this {'project' if project_scope else 'session'}."
+                )
+        elif command.startswith("/approve-request "):
+            request_id = command.removeprefix("/approve-request ").strip()
+            self.run_worker(self._approve_request(request_id))
+            chat_area.add_system_message(f"Approval submitted for {request_id}.")
+        elif command.startswith("/approve-project-request "):
+            request_id = command.removeprefix("/approve-project-request ").strip()
+            self.run_worker(self._approve_request(request_id, project=True))
+            chat_area.add_system_message(f"Project approval submitted for {request_id}.")
+        elif command.startswith("/deny-request "):
+            request_id = command.removeprefix("/deny-request ").strip()
+            result = self.execution_gateway.deny(request_id)
+            chat_area.add_system_message(result.content)
+        elif command == "/audit":
+            if self.execution_gateway is None:
+                chat_area.add_system_message("Security approvals are disabled for this project.")
+            elif not self.execution_gateway.audit:
+                chat_area.add_system_message("No security audit entries for this session.")
+            else:
+                entries = self.execution_gateway.audit[-10:]
+                lines = [
+                    f"{entry.get('decision', 'unknown')}: {entry.get('tool', 'tool')}"
+                    f" ({entry.get('status') or entry.get('reason') or 'recorded'})"
+                    for entry in entries
+                ]
+                chat_area.add_system_message("Recent security audit:\n" + "\n".join(lines))
+        elif command == "/memory":
+            records = self.memory_store.list()
+            chat_area.add_system_message("Project memory:\n" + "\n".join(f"- {item.content}" for item in records) if records else "Project memory is empty.")
+        elif command.startswith("/remember "):
+            content = command.removeprefix("/remember ").strip()
+            if not content:
+                chat_area.add_system_message("Usage: /remember <project fact or preference>")
+            else:
+                record = self.memory_store.save(MemoryRecord(content))
+                chat_area.add_system_message(f"Saved project memory: {record.id}")
+        elif command.startswith("/forget "):
+            record_id = command.removeprefix("/forget ").strip()
+            chat_area.add_system_message("Deleted project memory." if self.memory_store.delete(record_id) else "No project memory found with that id.")
+        elif command == "/context":
+            chat_area.add_system_message(self._context_summary())
+        elif command.startswith("/deny "):
+            requested = command.removeprefix("/deny ").strip()
+            project_scope = requested.startswith("project ")
+            if project_scope:
+                requested = requested.removeprefix("project ").strip()
+            for tool in self.tool_registry.list_enabled():
+                if tool.name.lower() == requested:
+                    if project_scope:
+                        self.execution_gateway.grants.revoke_project(tool.name)
+                        self.execution_gateway.grants.save_project(self.tool_context.working_dir)
+                    else:
+                        self.execution_gateway.grants.revoke(tool.name)
+                    chat_area.add_system_message(
+                        f"Revoked {'project' if project_scope else 'session'} approval for {tool.name}."
+                    )
+                    break
+            else:
+                chat_area.add_system_message(f"No enabled tool named: {requested}")
+        elif command == "/help":
             chat_area.add_system_message(
                 "Available commands:\n"
                 "  /help    - Show this help\n"
@@ -217,6 +313,11 @@ class MewCodeApp(App):
                 "  /save    - Save session\n"
                 "  /model   - Switch model\n"
                 "  /mode    - Toggle mode\n"
+                "  /approve <tool> - Approve a tool for this session\n"
+                "  /approve project <tool> - Approve a tool for this project\n"
+                "  /deny <tool> - Revoke a session approval\n"
+                "  /deny project <tool> - Revoke a project approval\n"
+                "  /audit   - Show recent security audit entries\n"
                 "  /quit    - Exit application"
             )
         elif command == "/copy":
@@ -234,6 +335,13 @@ class MewCodeApp(App):
             self.action_quit()
         else:
             chat_area.add_system_message(f"Unknown command: {command}")
+
+    async def _approve_request(self, request_id: str, project: bool = False) -> None:
+        result = await self.execution_gateway.approve(request_id, project=project)
+        if project and not result.is_error:
+            self.execution_gateway.grants.save_project(self.tool_context.working_dir)
+        chat_area = self.query_one("#chat-area", ChatArea)
+        chat_area.add_system_message(result.content)
 
     def _copy_last_reply(self) -> None:
         """复制最后一条 AI 回复到剪贴板"""
@@ -316,7 +424,17 @@ class MewCodeApp(App):
         into the conversation history."""
         sys_text = build_system_prompt(self.tool_context, self.tool_registry)
         sys_msg = Message(role=MessageRole.SYSTEM, content=sys_text)
-        return [sys_msg] + self.conversation_manager.get_messages()
+        memories = [
+            Message(MessageRole.SYSTEM, f"Project memory ({record.kind}): {record.content}")
+            for record in self.memory_store.list()
+        ]
+        return [sys_msg] + self.conversation_manager.get_messages() + memories
+
+    def _context_summary(self) -> str:
+        messages = self._messages_with_system()
+        items = [ContextItem(message.role.value, message.content, index, max(1, len(message.content) // 4)) for index, message in enumerate(messages)]
+        plan = plan_context(items, self.project_runtime.context_budget)
+        return f"Context: {plan.used_tokens}/{plan.budget} tokens; included {len(plan.included)}, excluded {len(plan.excluded)}."
 
     async def _process_with_llm(self, content: str) -> None:
         """Consume Agent Loop events and update the TUI."""
@@ -342,6 +460,8 @@ class MewCodeApp(App):
                 tools_payload=self._build_tools_payload(),
                 build_messages=self._messages_with_system,
                 cancel_event=self._agent_cancel_event,
+                execution_gateway=self.execution_gateway,
+                context_budget=self.project_runtime.context_budget,
             ):
                 if event.event_type == AgentEventType.STREAM_TEXT:
                     if not is_streaming:
@@ -372,6 +492,15 @@ class MewCodeApp(App):
                             summary=event.summary,
                         )
                     status_bar.update_agent_status("Thinking...")
+
+                elif event.event_type == AgentEventType.APPROVAL_REQUIRED:
+                    chat_area.add_approval_request(
+                        event.request_id or "unknown",
+                        event.tool_name or "tool",
+                        event.summary,
+                        event.approval,
+                    )
+                    status_bar.update_agent_status("Approval required")
 
                 elif event.event_type == AgentEventType.USAGE and event.usage is not None:
                     status_bar.update_token_usage(event.usage)
@@ -413,6 +542,8 @@ class MewCodeApp(App):
         """Cancel the active agent loop without quitting the app."""
         if self.is_processing and self._agent_cancel_event is not None:
             self._agent_cancel_event.set()
+            if self.execution_gateway is not None:
+                self.execution_gateway.cancel_pending()
             status_bar = self.query_one("#status-bar", StatusBar)
             status_bar.update_agent_status("Cancelling...")
             self.notify("Cancelling current request")

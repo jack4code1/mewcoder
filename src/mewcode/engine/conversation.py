@@ -22,6 +22,7 @@ class Conversation:
         self.updated_at = datetime.now()
         self.total_token_usage = TokenUsage()
         self.api_metrics = MetricsAggregate()
+        self.context_metadata: dict = {}
 
     def add_message(self, message: Message) -> None:
         """添加消息"""
@@ -63,6 +64,7 @@ class Conversation:
                 "total_tokens": self.total_token_usage.total_tokens,
             },
             "api_metrics": self.api_metrics.to_dict(),
+            "context_metadata": self.context_metadata,
         }
 
     @classmethod
@@ -79,6 +81,7 @@ class Conversation:
             total_tokens=usage.get("total_tokens", 0),
         )
         conv.api_metrics = MetricsAggregate.from_dict(data.get("api_metrics"))
+        conv.context_metadata = dict(data.get("context_metadata") or {})
 
         for msg_data in data.get("messages", []):
             conv.messages.append(Message.from_dict(msg_data))

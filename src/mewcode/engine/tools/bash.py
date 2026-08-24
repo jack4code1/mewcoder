@@ -12,6 +12,7 @@ import os
 from typing import Any, Optional
 
 from .base import Tool, ToolContext, ToolResult
+from ..security.models import OperationKind, RiskLevel
 
 
 _DEFAULT_TIMEOUT = 30
@@ -68,6 +69,8 @@ class BashTool(Tool):
     is_read_only = False
     is_destructive = True
     is_concurrency_safe = False
+    operation_kind = OperationKind.COMMAND
+    risk_level = RiskLevel.HIGH
 
     def validate_input(self, input: dict[str, Any]) -> Optional[str]:
         cmd = input.get("command")

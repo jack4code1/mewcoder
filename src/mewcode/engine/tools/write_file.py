@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from .base import Tool, ToolContext, ToolResult
+from ..security.models import OperationKind, RiskLevel
 
 
 class WriteFileTool(Tool):
@@ -38,6 +39,8 @@ class WriteFileTool(Tool):
     is_read_only = False
     is_destructive = False
     is_concurrency_safe = False
+    operation_kind = OperationKind.WRITE
+    risk_level = RiskLevel.MODERATE
 
     def validate_input(self, input: dict[str, Any]) -> Optional[str]:
         path = input.get("path")

@@ -47,6 +47,9 @@ Thumbs.db
 # MewCode
 .mewcode/
 .mewcode_test_sessions/
+config.local.yaml
+.env
+.env.*
 
 # Claude Code per-machine settings (skills DO go in)
 .claude/settings.local.json

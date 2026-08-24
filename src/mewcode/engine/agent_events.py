@@ -21,6 +21,7 @@ class AgentEventType(str, Enum):
     USAGE = "usage"
     METRICS = "metrics"
     ERROR = "error"
+    APPROVAL_REQUIRED = "approval_required"
 
 
 class AgentStopReason(str, Enum):
@@ -57,6 +58,8 @@ class AgentEvent:
     metrics_snapshot: Optional[MetricsSnapshot] = None
     api_call_metrics: Optional[ApiCallMetrics] = None
     message: str = ""
+    request_id: Optional[str] = None
+    approval: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def stream_text(cls, text: str) -> "AgentEvent":
@@ -127,3 +130,16 @@ class AgentEvent:
     @classmethod
     def error(cls, message: str) -> "AgentEvent":
         return cls(event_type=AgentEventType.ERROR, message=message, is_error=True)
+
+    @classmethod
+    def approval_required(
+        cls, tool_name: str, summary: str, request_id: str | None = None,
+        approval: dict[str, Any] | None = None,
+    ) -> "AgentEvent":
+        return cls(
+            event_type=AgentEventType.APPROVAL_REQUIRED,
+            tool_name=tool_name,
+            summary=summary,
+            request_id=request_id,
+            approval=approval or {},
+        )

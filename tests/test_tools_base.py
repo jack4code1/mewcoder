@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from mewcode.engine.tools.base import Tool, ToolContext, ToolError, ToolResult
+from mewcode.engine.security import WorkspaceViolation
 
 
 class TestToolResult:
@@ -39,6 +40,20 @@ class TestToolContext:
         resolved = ctx.resolve_path("does/not/exist.txt")
         # Should still produce an absolute path
         assert resolved.is_absolute()
+
+    def test_resolve_rejects_paths_outside_workspace(self, tmp_path: Path):
+        ctx = ToolContext.detect(working_dir=tmp_path)
+
+        with pytest.raises(WorkspaceViolation):
+            ctx.resolve_path(str(tmp_path.parent / "outside.txt"))
+
+    def test_preview_path_is_workspace_scoped(self, tmp_path: Path):
+        ctx = ToolContext.detect(working_dir=tmp_path)
+
+        preview = ctx.preview_path("notes.txt")
+
+        assert preview["path"] == str((tmp_path / "notes.txt").resolve())
+        assert preview["resource_summary"].startswith("file: ")
 
     def test_detect_populates_os_and_shell(self):
         ctx = ToolContext.detect()

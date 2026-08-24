@@ -111,7 +111,8 @@ class InputBox(Widget):
 
     def _complete_command(self, value: str) -> None:
         """Complete command"""
-        commands = ["/help", "/copy", "/clear", "/save", "/model", "/mode", "/quit"]
+        from ...engine.extensions import CommandCatalog
+        commands = CommandCatalog().names()
         matches = [cmd for cmd in commands if cmd.startswith(value)]
 
         if len(matches) == 1:

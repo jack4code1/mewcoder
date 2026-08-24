@@ -15,6 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from ..security.models import OperationKind, RiskLevel
+from ..security.workspace import resolve_in_workspace, summarize_resource
+
 
 class ToolError(Exception):
     """Sentinel exception for unrecoverable system-level failures.
@@ -68,16 +71,19 @@ class ToolContext:
         working_dir. The result is fully resolved (symlinks etc. follow
         OS defaults — see spec N6).
         """
-        path = Path(p)
-        if not path.is_absolute():
-            path = self.working_dir / path
         try:
-            return path.resolve()
+            return resolve_in_workspace(self.working_dir, p)
         except OSError:
             # If the path can't be fully resolved (e.g. permission), keep
             # the unresolved absolute path so the caller can produce a
             # meaningful error result instead of crashing.
-            return path
+            path = Path(p)
+            return path if path.is_absolute() else self.working_dir / path
+
+    def preview_path(self, p: str) -> dict[str, str]:
+        """Return a safe path preview for approval and audit UI."""
+        path = self.resolve_path(p)
+        return {"path": str(path), "resource_summary": summarize_resource(path)}
 
     @classmethod
     def detect(cls, working_dir: Optional[Path] = None) -> "ToolContext":
@@ -115,6 +121,8 @@ class Tool(ABC):
     is_read_only: bool = False
     is_destructive: bool = False
     is_concurrency_safe: bool = False
+    operation_kind: OperationKind = OperationKind.READ
+    risk_level: RiskLevel = RiskLevel.LOW
 
     def validate_input(self, input: dict[str, Any]) -> Optional[str]:
         """Semantic validation of input. Return English error string or None.

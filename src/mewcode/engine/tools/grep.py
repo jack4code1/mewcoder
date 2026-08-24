@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .base import Tool, ToolContext, ToolResult
+from ..security.models import OperationKind, RiskLevel
 from .glob import EXCLUDE_DIRS
 
 
@@ -71,6 +72,8 @@ class GrepTool(Tool):
     is_read_only = True
     is_destructive = False
     is_concurrency_safe = True
+    operation_kind = OperationKind.READ
+    risk_level = RiskLevel.LOW
 
     def validate_input(self, input: dict[str, Any]) -> Optional[str]:
         pattern = input.get("pattern")

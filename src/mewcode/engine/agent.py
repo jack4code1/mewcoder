@@ -13,6 +13,10 @@ from .models.client import LLMClient
 from .models.metrics import ApiCallMetrics, MetricsAggregate, MetricsSnapshot
 from .models.message import Message, MessageRole, TokenUsage, ToolCall
 from .tools import ToolRegistry, ToolResult
+from .security.gateway import ExecutionGateway
+from .security.models import ExecutionRequest
+from .context import plan_messages
+from .extensions.hooks import HookRunner
 
 
 def summarize_tool_input(name: str, input: dict) -> str:
@@ -67,7 +71,7 @@ def partition_tool_calls(
 
 
 async def _execute_tool_call(
-    registry: ToolRegistry, call: ToolCall
+    registry: ToolRegistry, call: ToolCall, gateway: ExecutionGateway | None = None
 ) -> tuple[ToolCall, ToolResult, int]:
     start = time.monotonic()
     if call.parse_error:
@@ -78,7 +82,19 @@ async def _execute_tool_call(
         )
     else:
         try:
-            result = await registry.execute(call.name, call.input)
+            tool = registry.get(call.name)
+            if gateway is not None and tool is not None:
+                result = await gateway.execute(
+                    ExecutionRequest(
+                        tool_name=call.name,
+                        input=call.input,
+                        request_id=call.id,
+                        operation=tool.operation_kind,
+                        risk=tool.risk_level,
+                    )
+                )
+            else:
+                result = await registry.execute(call.name, call.input)
         except Exception as e:  # noqa: BLE001  surface as agent-visible error
             result = ToolResult(
                 content=f"Tool dispatch failed: {e}",
@@ -95,18 +111,19 @@ async def _run_batch(
     batch: ToolBatch,
     registry: ToolRegistry,
     max_concurrency: int,
+    gateway: ExecutionGateway | None = None,
 ) -> list[tuple[ToolCall, ToolResult, int]]:
     if not batch.is_concurrency_safe:
         results = []
         for call in batch.calls:
-            results.append(await _execute_tool_call(registry, call))
+            results.append(await _execute_tool_call(registry, call, gateway))
         return results
 
     semaphore = asyncio.Semaphore(max(1, max_concurrency))
 
     async def run_one(call: ToolCall) -> tuple[ToolCall, ToolResult, int]:
         async with semaphore:
-            return await _execute_tool_call(registry, call)
+            return await _execute_tool_call(registry, call, gateway)
 
     return list(await asyncio.gather(*(run_one(call) for call in batch.calls)))
 
@@ -148,6 +165,9 @@ async def run_agent_loop(
     invalid_tool_limit: int = 3,
     max_concurrency: int = 4,
     cancel_event: Optional[asyncio.Event] = None,
+    execution_gateway: ExecutionGateway | None = None,
+    context_budget: int | None = None,
+    hook_runner: HookRunner | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> AsyncIterator[AgentEvent]:
     """Run the ReAct loop and emit progress events.
@@ -157,6 +177,12 @@ async def run_agent_loop(
     """
     total_usage = conversation_manager.get_token_usage()
     consecutive_invalid_tools = 0
+
+    if hook_runner is not None:
+        for hook in await hook_runner.run("task_start"):
+            if not hook.success:
+                yield AgentEvent.error(f"Hook {hook.name} failed: {hook.message}")
+                return
 
     for turn_index in range(1, max_iterations + 1):
         if cancel_event is not None and cancel_event.is_set():
@@ -171,9 +197,17 @@ async def run_agent_loop(
         first_token_at: Optional[float] = None
 
         try:
-            async for chunk in llm_client.chat_stream(
-                build_messages(), tools=tools_payload
-            ):
+            messages = build_messages()
+            if context_budget is not None:
+                messages, context_plan = plan_messages(messages, context_budget)
+                active = conversation_manager.get_active_conversation()
+                if active is not None:
+                    active.context_metadata = {
+                        "budget": context_plan.budget,
+                        "used_tokens": context_plan.used_tokens,
+                        "excluded_sources": [item.source for item in context_plan.excluded],
+                    }
+            async for chunk in llm_client.chat_stream(messages, tools=tools_payload):
                 if cancel_event is not None and cancel_event.is_set():
                     yield AgentEvent.loop_complete(
                         turn_index - 1, AgentStopReason.CANCELLED
@@ -219,6 +253,8 @@ async def run_agent_loop(
         yield AgentEvent.turn_complete(turn_index)
 
         if not pending_tool_calls:
+            if hook_runner is not None:
+                await hook_runner.run("task_complete")
             yield AgentEvent.loop_complete(turn_index, AgentStopReason.MODEL_DONE)
             return
 
@@ -236,8 +272,22 @@ async def run_agent_loop(
                 yield AgentEvent.loop_complete(turn_index, AgentStopReason.CANCELLED)
                 return
 
-            results = await _run_batch(batch, tool_registry, max_concurrency)
+            results = await _run_batch(
+                batch, tool_registry, max_concurrency, execution_gateway
+            )
             for call, result, duration_ms in results:
+                if result.metadata.get("reason") == "approval_required":
+                    yield AgentEvent.approval_required(
+                        call.name,
+                        summarize_tool_input(call.name, call.input),
+                        result.metadata.get("request_id"),
+                        result.metadata.get("approval"),
+                    )
+                    request_id = result.metadata.get("request_id")
+                    if execution_gateway is not None and request_id:
+                        if cancel_event is not None and cancel_event.is_set():
+                            execution_gateway.cancel_pending()
+                        result = await execution_gateway.wait_for_approval(request_id)
                 conversation_manager.add_message(
                     Message(
                         role=MessageRole.TOOL,

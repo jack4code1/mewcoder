@@ -63,6 +63,28 @@ class ChatArea(Widget):
         self._get_scroll_container().mount(widget)
         self._scroll_to_bottom()
 
+    def add_approval_request(
+        self, request_id: str, tool_name: str, summary: str,
+        approval: dict | None = None,
+    ) -> None:
+        """Render a structured, selectable approval prompt in the chat transcript."""
+        approval = approval or {}
+        text = Text()
+        text.append("Approval required\n", style="bold yellow")
+        text.append(f"Tool: {tool_name}\n")
+        text.append(f"Target: {approval.get('resource_summary') or summary}\n")
+        text.append(f"Operation: {approval.get('operation', 'unknown')}\n")
+        text.append(f"Risk: {approval.get('risk', 'unknown')}\n", style="yellow")
+        text.append(f"Request: {request_id}\n", style="dim")
+        text.append(
+            f"/approve-request {request_id}  |  "
+            f"/approve-project-request {request_id}  |  "
+            f"/deny-request {request_id}",
+            style="cyan",
+        )
+        self._get_scroll_container().mount(Static(text, classes="chat-msg system-msg"))
+        self._scroll_to_bottom()
+
     def add_assistant_message_start(self) -> None:
         """开始 AI 消息(流式输出前调用)"""
         self._stream_buffer = ""
