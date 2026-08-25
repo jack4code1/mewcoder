@@ -10,6 +10,7 @@ from .approval import ApprovalManager, ApprovalStatus
 from .models import ApprovalScope, ExecutionRequest, PermissionDecision
 from .policy import PermissionStore, decide
 from .audit import AuditLog
+from .revisions import RevisionStore
 
 
 @dataclass
@@ -19,6 +20,7 @@ class ExecutionGateway:
     audit: list[dict] = field(default_factory=list)
     audit_log: AuditLog | None = None
     approvals: ApprovalManager = field(default_factory=ApprovalManager)
+    revisions: RevisionStore | None = None
 
     @property
     def pending(self) -> dict[str, ExecutionRequest]:
@@ -53,12 +55,23 @@ class ExecutionGateway:
                     "audit": entry,
                 },
             )
+        revision = self._capture_revision(request)
         result = await self.registry.execute(request.tool_name, request.input)
+        if revision is not None and not result.is_error:
+            result.metadata.setdefault("revision_id", revision.id)
         entry["is_error"] = result.is_error
         entry["status"] = "executed"
         self._record(entry)
         result.metadata.setdefault("audit", entry)
         return result
+
+    def _capture_revision(self, request: ExecutionRequest):
+        if self.revisions is None or request.tool_name not in {"WriteFile", "EditFile"}:
+            return None
+        raw_path = request.input.get("path")
+        if not isinstance(raw_path, str):
+            return None
+        return self.revisions.capture(self.registry.ctx.resolve_path(raw_path))
 
     async def approve(self, request_id: str, *, project: bool = False) -> ToolResult:
         """Resolve an approval; the waiting Agent loop executes the request."""
@@ -86,7 +99,10 @@ class ExecutionGateway:
         decision = await self.approvals.wait(approval)
         request = approval.execution
         if decision is PermissionDecision.ALLOW:
+            revision = self._capture_revision(request)
             result = await self.registry.execute(request.tool_name, request.input)
+            if revision is not None and not result.is_error:
+                result.metadata.setdefault("revision_id", revision.id)
             entry = {
                 "tool": request.tool_name,
                 "source": request.source,

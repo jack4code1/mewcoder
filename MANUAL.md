@@ -5,28 +5,19 @@
 ### 安装依赖
 
 ```bash
-pip install textual httpx pyyaml rich
+python -m venv .venv
+# macOS/Linux
+.venv/bin/python -m pip install -e ".[dev]"
+# Windows PowerShell
+.venv\Scripts\python -m pip install -e ".[dev]"
 ```
 
 ### 启动 MewCode
 
-#### 方式 1: PowerShell
-```powershell
-cd E:\agent_class\project
-.\start.ps1
-```
-
-#### 方式 2: CMD
-```cmd
-cd E:\agent_class\project
-start.bat
-```
-
-#### 方式 3: 直接命令
-```powershell
-cd E:\agent_class\project
-$env:PYTHONPATH="E:\agent_class\project\src"
-python -c "from mewcode.tui.app import run_app; run_app(model='mimo-v2.5-pro', provider='custom')"
+```bash
+mewcode
+# 或
+python -m mewcode
 ```
 
 ---
@@ -71,6 +62,11 @@ python -c "from mewcode.tui.app import run_app; run_app(model='mimo-v2.5-pro', p
 | `/save` | 保存当前会话 |
 | `/model` | 切换模型（待实现） |
 | `/mode` | 切换对话/单次模式 |
+| `/context` | 查看当前上下文预算摘要 |
+| `/memory` | 查看项目记忆 |
+| `/remember <内容>` | 保存项目记忆 |
+| `/forget <id>` | 删除项目记忆 |
+| `/audit` | 查看最近安全审计记录（启用安全模式时） |
 | `/quit` | 退出程序 |
 
 ### 快捷键
@@ -103,7 +99,7 @@ python -c "from mewcode.tui.app import run_app; run_app(model='mimo-v2.5-pro', p
 
 ### 配置文件位置
 
-`E:\agent_class\project\config.yaml`
+仓库根目录的 `config.yaml`
 
 ### 配置示例
 
@@ -151,6 +147,39 @@ $env:MIMO_API_KEY="your-api-key"
 | Claude | claude-3-5-sonnet | 需要 Anthropic API Key |
 | Ollama | llama2, mistral | 需要本地 Ollama 服务 |
 | 自定义 | mimo-v2.5-pro | 小米 MiMo API |
+
+### 上下文、记忆与安全
+
+MewCode 会按项目上下文预算裁剪发送给模型的消息，可通过 `/context` 查看摘要。`/memory`、`/remember` 和 `/forget` 管理当前工作目录下的项目记忆。
+
+安全审批默认开启：状态变更工具会请求授权，而只读工具可直接运行。可使用 `/approve`、`/deny` 和 `/audit` 管理授权与查看审计记录。仅可信自动化场景应在被忽略的 `config.local.yaml` 中显式设置 `security.enabled: false`。
+
+MCP、Hooks、任务编排、Worktrees 与 Agent Teams 目前仅提供基础模块，尚未形成可从 TUI 完成的工作流。
+
+任务编排支持在干净 Git Worktree 中运行受限任务、收集可审阅 diff 并管理租约；团队协调器可拒绝重叠上下文并限制并发。
+
+### 隔离子任务与审阅
+
+`/task <目标>` 在干净主工作区上创建隔离 Worktree。子任务的写入、命令和外部工具请求会显示主 TUI 审批卡。使用 `/tasks` 查看结果；用 `/task apply <id>` 应用 diff，或用 `/task discard <id>` 丢弃租约。
+
+### Revision、记忆与 Skills
+
+写入和编辑前会保存 revision。`/diff` 列出可用 revision，`/rollback <id>` 恢复原内容。`/memory search <查询>` 搜索项目记忆，`/summarize` 压缩较早会话历史。使用 `/skill add <名称> <指令>` 与 `/skill delete <名称>` 管理项目 Skills。
+
+### 项目 Hooks
+
+可在 `.mewcode/hooks.yaml` 配置 `task_start` 或 `task_complete` 的 Bash Hook。Hook 和普通 Bash 工具一样受安全审批保护；先使用 `/approve project Bash` 授权，未授权的 Hook 会阻止该次任务执行。
+
+```yaml
+hooks:
+  - event: task_start
+    name: focused-tests
+    command: python -m pytest -q
+```
+
+### 项目 Skills
+
+将 UTF-8 Markdown 指令保存到项目的 `.mewcode/skills/` 目录，MewCode 会在每次请求前自动加载。文件名（不含 `.md`）是 Skill 名称；使用 `/skills` 查看当前加载结果。
 
 ---
 
@@ -254,8 +283,7 @@ cat ~/.mewcode/logs/mewcode.log
 ### 运行测试
 
 ```powershell
-$env:PYTHONPATH="E:\agent_class\project\src"
-python -m pytest tests/ -v
+python -m pytest
 ```
 
 ### 添加新模型
@@ -273,7 +301,7 @@ python -m pytest tests/ -v
 
 ## 联系方式
 
-- 项目地址：E:\agent_class\project
+- 项目地址：当前 Git 仓库根目录
 - 日志位置：~/.mewcode/logs/
 - 会话位置：~/.mewcode/sessions/
 ## UI Layout Note

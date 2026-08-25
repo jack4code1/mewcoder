@@ -36,6 +36,9 @@ MewCode 是一个轻量级的终端 AI 编程助手，支持多种大语言模�
 - 💾 **会话持久化** - YAML 格式保存对话历史
 - 🎯 **命令补全** - Tab 补全内置命令
 - 📊 **状态监控** - 实时显示 Token 用量、会话时长等信息
+- 🧠 **项目上下文与记忆** - Token 预算、上下文概览和项目级记忆命令
+- 📚 **项目 Skills** - 自动加载 `.mewcode/skills/*.md` 作为可复用项目指令
+- 🔒 **可选安全审批** - 启用后，状态变更工具需经会话或项目级授权，并保留审计记录
 
 ---
 
@@ -180,18 +183,17 @@ tools:
   max_output_chars: 10000
 ```
 
-#### 4. 记忆层 (Memory) - 待实现
+#### 4. 上下文与项目记忆
 
-- 项目上下文管理
-- 对话历史索引
-- 用户偏好存储
+当前应用会在每次请求中按 Token 预算裁剪上下文，并支持 `/context` 查看预算摘要。`/memory`、`/remember` 和 `/forget` 管理项目级记忆；记忆会作为 system context 注入后续请求。
 
-#### 5. 安全层 (Security) - 待实现
+#### 5. 安全审批（可选）
 
-- 命令确认机制
-- 文件 diff 预览
-- 操作回滚
-- 沙箱执行
+写文件、编辑文件和命令执行默认通过审批网关；只读工具无需确认。TUI 提供单次请求、会话和项目级授权，以及 `/audit` 审计查看。仅可信自动化场景应在被忽略的 `config.local.yaml` 中显式设置 `security.enabled: false`。
+
+#### 6. 扩展能力状态
+
+MCP、Skill、Hook、任务编排、Worktree 和 Agent Teams 已有隔离的基础数据结构或适配层，但尚未接入完整的 TUI 用户工作流，不能视为可用产品功能。
 
 ---
 
@@ -276,14 +278,19 @@ mewcode/
 ### 安装依赖
 
 ```bash
-pip install textual httpx pyyaml rich
+python -m venv .venv
+# macOS/Linux
+.venv/bin/python -m pip install -e ".[dev]"
+# Windows PowerShell
+.venv\Scripts\python -m pip install -e ".[dev]"
 ```
 
 ### 启动 MewCode
 
-```powershell
-cd E:\agent_class\project
-.\start.ps1
+```bash
+mewcode
+# 或
+python -m mewcode
 ```
 
 ### 配置 API
@@ -323,6 +330,24 @@ $env:MIMO_API_KEY="your-api-key"
 | `/save` | 保存当前会话 |
 | `/copy` | 复制最后一条 AI 回复 |
 | `/mode` | 切换对话/单次模式 |
+| `/context` | 查看当前上下文预算摘要 |
+| `/memory` | 查看项目记忆 |
+| `/remember <内容>` | 保存项目记忆 |
+| `/forget <id>` | 删除项目记忆 |
+| `/skills` | 查看已加载的项目 Skills |
+| `/mcp` | 查看已配置 MCP 服务 |
+| `/mcp connect <name>` | 显式连接启用的 MCP 服务 |
+| `/task <目标>` | 在隔离 Worktree 中运行子任务 |
+| `/tasks` | 查看子任务结果 |
+| `/task apply <id>` | 应用子任务 diff |
+| `/task discard <id>` | 丢弃子任务 Worktree |
+| `/diff` | 查看可回滚 revision |
+| `/rollback <id>` | 回滚一个 revision |
+| `/memory search <查询>` | 搜索项目记忆 |
+| `/summarize` | 压缩较早会话历史 |
+| `/skill add <名称> <指令>` | 创建项目 Skill |
+| `/skill delete <名称>` | 删除项目 Skill |
+| `/audit` | 查看最近安全审计记录（启用安全模式时） |
 | `/quit` | 退出程序 |
 
 ## 快捷键

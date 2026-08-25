@@ -10,7 +10,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import Footer, Header
 
-from ..config import get_model_config, get_tools_config, load_config
+from ..config import get_mcp_servers, get_model_config, get_tools_config, load_config
 from ..engine.adapters import AdapterFactory
 from ..engine.adapters.claude_adapter import ClaudeAdapter
 from ..engine.conversation import ConversationManager
@@ -18,10 +18,16 @@ from ..engine.agent import run_agent_loop
 from ..engine.agent_events import AgentEventType, AgentStopReason
 from ..engine.security.gateway import ExecutionGateway
 from ..engine.security.audit import AuditLog
+from ..engine.security.revisions import RevisionStore
 from ..engine.runtime import ProjectRuntime
 from ..engine.context import ContextItem, ProjectMemoryStore, plan_context
 from ..engine.context import MemoryRecord
+from ..engine.context import compress_messages
+from ..engine.extensions import ProjectHookStore, ProjectSkillStore, SkillRunner
+from ..engine.extensions import CommandCatalog
 from ..engine.models import Message, MessageRole, TokenUsage
+from ..engine.orchestration import TaskRunner, TaskSpec, WorktreeManager
+from ..engine.mcp import McpServerConfig, McpServerManager
 from ..engine.tools import (
     ToolContext,
     build_default_registry,
@@ -136,14 +142,26 @@ class MewCodeApp(App):
         )
         self.project_runtime = ProjectRuntime(self.tool_context.working_dir)
         self.memory_store = ProjectMemoryStore(self.tool_context.working_dir)
+        self.skill_store = ProjectSkillStore(self.tool_context.working_dir)
+        self.skill_runner = SkillRunner()
         self.tool_registry = build_default_registry(self.tool_context, self.config)
+        self.worktree_manager = WorktreeManager(self.tool_context.working_dir)
+        self.task_runs = []
+        self.mcp_manager = McpServerManager([
+            McpServerConfig(**server) for server in get_mcp_servers(self.config)
+        ])
         self.execution_gateway = None
+        self.hook_runner = None
         if self.config.get("security", {}).get("enabled", False):
             self.execution_gateway = ExecutionGateway(
-                self.tool_registry, audit_log=AuditLog(self.tool_context.working_dir)
+                self.tool_registry, audit_log=AuditLog(self.tool_context.working_dir),
+                revisions=RevisionStore(self.tool_context.working_dir),
             )
             self.execution_gateway.grants.load_project(self.tool_context.working_dir)
             self.execution_gateway.grants = self.project_runtime.permissions
+            self.hook_runner = ProjectHookStore(self.tool_context.working_dir).build_runner(
+                self.execution_gateway
+            )
         logger.info(
             "Tool registry initialised: %s",
             [t.name for t in self.tool_registry.list_enabled()],
@@ -188,6 +206,7 @@ class MewCodeApp(App):
                 await self.llm_client.close()
             except Exception:
                 pass
+        await self.mcp_manager.close()
 
     def on_input_submitted(self, event: InputSubmitted) -> None:
         """Handle input submission"""
@@ -271,9 +290,61 @@ class MewCodeApp(App):
                     for entry in entries
                 ]
                 chat_area.add_system_message("Recent security audit:\n" + "\n".join(lines))
+        elif command == "/diff":
+            revisions = self.execution_gateway.revisions.list() if self.execution_gateway and self.execution_gateway.revisions else []
+            chat_area.add_system_message("Revisions:\n" + "\n".join(f"- {item.id}: {item.path}" for item in revisions[-10:]) if revisions else "No saved revisions.")
+        elif command.startswith("/rollback "):
+            revision_id = command.removeprefix("/rollback ").strip()
+            store = self.execution_gateway.revisions if self.execution_gateway else None
+            revision = store.rollback(revision_id) if store else None
+            chat_area.add_system_message(f"Rolled back: {revision.path}" if revision else "No revision found.")
         elif command == "/memory":
             records = self.memory_store.list()
-            chat_area.add_system_message("Project memory:\n" + "\n".join(f"- {item.content}" for item in records) if records else "Project memory is empty.")
+            chat_area.add_system_message(
+                "Project memory:\n"
+                + "\n".join(f"- {item.id} [{item.kind}]: {item.content}" for item in records)
+                if records
+                else "Project memory is empty."
+            )
+        elif command == "/skills":
+            skills = self.skill_store.list()
+            chat_area.add_system_message(
+                "Active project skills:\n"
+                + "\n".join(f"- {skill.name}: {skill.source}" for skill in skills)
+                if skills
+                else "No project skills found."
+            )
+        elif command.startswith("/skill add "):
+            parts = command.removeprefix("/skill add ").strip().split(maxsplit=1)
+            if len(parts) != 2:
+                chat_area.add_system_message("Usage: /skill add <name> <instructions>")
+            else:
+                try:
+                    skill = self.skill_store.save(parts[0], parts[1])
+                    chat_area.add_system_message(f"Saved project skill: {skill.name}")
+                except ValueError as exc:
+                    chat_area.add_system_message(str(exc))
+        elif command.startswith("/skill delete "):
+            name = command.removeprefix("/skill delete ").strip()
+            chat_area.add_system_message(
+                f"Deleted project skill: {name}" if self.skill_store.delete(name) else f"No project skill named: {name}"
+            )
+        elif command == "/mcp":
+            if not self.mcp_manager.status:
+                chat_area.add_system_message("No MCP servers configured.")
+            else:
+                chat_area.add_system_message("MCP servers:\n" + "\n".join(
+                    f"- {name}: {status}" for name, status in self.mcp_manager.status.items()
+                ))
+        elif command.startswith("/mcp connect "):
+            name = command.removeprefix("/mcp connect ").strip()
+            if name not in self.mcp_manager.servers:
+                chat_area.add_system_message(f"No configured MCP server named: {name}")
+            elif self.mcp_manager.status.get(name) == "disabled":
+                chat_area.add_system_message(f"MCP server {name} is disabled in configuration.")
+            else:
+                self.run_worker(self._connect_mcp(name))
+                chat_area.add_system_message(f"Connecting MCP server: {name}")
         elif command.startswith("/remember "):
             content = command.removeprefix("/remember ").strip()
             if not content:
@@ -284,6 +355,53 @@ class MewCodeApp(App):
         elif command.startswith("/forget "):
             record_id = command.removeprefix("/forget ").strip()
             chat_area.add_system_message("Deleted project memory." if self.memory_store.delete(record_id) else "No project memory found with that id.")
+        elif command.startswith("/memory search "):
+            query = command.removeprefix("/memory search ").strip()
+            records = self.memory_store.search(query)
+            chat_area.add_system_message(
+                "Memory search:\n" + "\n".join(f"- {item.id} [{item.kind}]: {item.content}" for item in records)
+                if records else "No matching project memory."
+            )
+        elif command == "/summarize":
+            messages = self.conversation_manager.get_messages()
+            summary = compress_messages(messages)
+            if summary is None:
+                chat_area.add_system_message("Not enough conversation history to summarize.")
+            else:
+                active = self.conversation_manager.get_active_conversation()
+                if active is not None:
+                    active.messages = [summary.summary] + messages[-8:]
+                chat_area.add_system_message(f"Summarized {summary.source_count} earlier messages.")
+        elif command.startswith("/task "):
+            objective = command.removeprefix("/task ").strip()
+            if not objective:
+                chat_area.add_system_message("Usage: /task <objective>")
+            elif self.is_processing:
+                chat_area.add_system_message("Wait for the active request before starting a task.")
+            else:
+                self.run_worker(self._run_isolated_task(objective))
+                chat_area.add_system_message(f"Starting isolated task: {objective}")
+        elif command == "/tasks":
+            if not self.task_runs:
+                chat_area.add_system_message("No isolated tasks have run.")
+            else:
+                chat_area.add_system_message("Tasks:\n" + "\n".join(
+                    f"- {run.id[:8]} {run.status}: {run.result[:120]}" for run in self.task_runs
+                ))
+        elif command.startswith("/task apply "):
+            task_id = command.removeprefix("/task apply ").strip()
+            try:
+                diff = self.worktree_manager.apply(task_id)
+                chat_area.add_system_message(f"Applied task {task_id[:8]}.\n{diff or '(no changes)'}")
+            except (ValueError, RuntimeError) as exc:
+                chat_area.add_system_message(f"Could not apply task: {exc}")
+        elif command.startswith("/task discard "):
+            task_id = command.removeprefix("/task discard ").strip()
+            try:
+                self.worktree_manager.cleanup(task_id)
+                chat_area.add_system_message(f"Discarded task {task_id[:8]}.")
+            except ValueError as exc:
+                chat_area.add_system_message(f"Could not discard task: {exc}")
         elif command == "/context":
             chat_area.add_system_message(self._context_summary())
         elif command.startswith("/deny "):
@@ -305,20 +423,10 @@ class MewCodeApp(App):
             else:
                 chat_area.add_system_message(f"No enabled tool named: {requested}")
         elif command == "/help":
+            commands = CommandCatalog().definitions()
             chat_area.add_system_message(
                 "Available commands:\n"
-                "  /help    - Show this help\n"
-                "  /copy    - Copy last AI reply to clipboard\n"
-                "  /clear   - Clear chat\n"
-                "  /save    - Save session\n"
-                "  /model   - Switch model\n"
-                "  /mode    - Toggle mode\n"
-                "  /approve <tool> - Approve a tool for this session\n"
-                "  /approve project <tool> - Approve a tool for this project\n"
-                "  /deny <tool> - Revoke a session approval\n"
-                "  /deny project <tool> - Revoke a project approval\n"
-                "  /audit   - Show recent security audit entries\n"
-                "  /quit    - Exit application"
+                + "\n".join(f"  {item.name} - {item.description}" for item in commands)
             )
         elif command == "/copy":
             self._copy_last_reply()
@@ -342,6 +450,54 @@ class MewCodeApp(App):
             self.execution_gateway.grants.save_project(self.tool_context.working_dir)
         chat_area = self.query_one("#chat-area", ChatArea)
         chat_area.add_system_message(result.content)
+
+    async def _connect_mcp(self, name: str) -> None:
+        chat_area = self.query_one("#chat-area", ChatArea)
+        try:
+            count = await self.mcp_manager.connect_and_register(name, self.tool_registry)
+            chat_area.add_system_message(f"MCP server {name} ready with {count} tools.")
+        except Exception as exc:
+            chat_area.add_system_message(f"MCP server {name} failed: {exc}")
+
+    async def _run_isolated_task(self, objective: str) -> None:
+        chat_area = self.query_one("#chat-area", ChatArea)
+        if not self._ensure_llm_client():
+            return
+        original_gateway = self.execution_gateway
+
+        async def worker(spec, lease):
+            context = ToolContext.detect(lease.path)
+            registry = build_default_registry(context, self.config)
+            gateway = ExecutionGateway(
+                registry,
+                grants=self.project_runtime.permissions,
+                audit_log=AuditLog(lease.path),
+                revisions=RevisionStore(lease.path),
+            )
+            self.execution_gateway = gateway
+            text = ""
+            async for event in run_agent_loop(
+                llm_client=self.llm_client,
+                conversation_manager=ConversationManager(storage_dir=str(lease.path / ".mewcode" / "sessions")),
+                tool_registry=registry,
+                tools_payload=registry.to_openai_format(),
+                build_messages=lambda: [Message(MessageRole.SYSTEM, build_system_prompt(context, registry)), Message(MessageRole.USER, spec.objective)],
+                execution_gateway=gateway,
+            ):
+                if event.event_type == AgentEventType.STREAM_TEXT:
+                    text += event.text
+                elif event.event_type == AgentEventType.APPROVAL_REQUIRED:
+                    chat_area.add_approval_request(
+                        event.request_id or "unknown", event.tool_name or "tool", event.summary, event.approval
+                    )
+            return text
+
+        try:
+            run = await TaskRunner().run_isolated(TaskSpec(objective), self.worktree_manager, worker, keep_worktree=True)
+            self.task_runs.append(run)
+            chat_area.add_system_message(f"Isolated task {run.id[:8]} {run.status}: {run.result}\nDiff:\n{run.diff or '(no changes)'}")
+        finally:
+            self.execution_gateway = original_gateway
 
     def _copy_last_reply(self) -> None:
         """复制最后一条 AI 回复到剪贴板"""
@@ -428,7 +584,11 @@ class MewCodeApp(App):
             Message(MessageRole.SYSTEM, f"Project memory ({record.kind}): {record.content}")
             for record in self.memory_store.list()
         ]
-        return [sys_msg] + self.conversation_manager.get_messages() + memories
+        skills = [
+            Message(MessageRole.SYSTEM, f"Project skill ({item.source}): {item.content}")
+            for item in self.skill_runner.context_items(self.skill_store.list())
+        ]
+        return [sys_msg] + skills + memories + self.conversation_manager.get_messages()
 
     def _context_summary(self) -> str:
         messages = self._messages_with_system()
@@ -462,6 +622,7 @@ class MewCodeApp(App):
                 cancel_event=self._agent_cancel_event,
                 execution_gateway=self.execution_gateway,
                 context_budget=self.project_runtime.context_budget,
+                hook_runner=self.hook_runner,
             ):
                 if event.event_type == AgentEventType.STREAM_TEXT:
                     if not is_streaming:

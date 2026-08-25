@@ -31,6 +31,7 @@ async def _run_message(app: MewCodeApp, pilot, content: str) -> list:
 @pytest.mark.asyncio
 async def test_tui_consumes_agent_loop_events_for_multiple_tool_rounds():
     app = MewCodeApp()
+    app.execution_gateway = None
     async with app.run_test() as pilot:
         app.llm_client = FakeClient(
             [

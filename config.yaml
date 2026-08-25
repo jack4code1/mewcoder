@@ -34,13 +34,18 @@ tui:
   show_session_duration: true
 
 # 工具子系统(02-tools 章节新增)
-# Security is opt-in for backward compatibility; enabled projects require
-# approval before state-changing tools run.
+# State-changing tools require approval by default. Trusted automation may
+# explicitly set this to false in config.local.yaml.
 security:
-  enabled: false
+  enabled: true
   approval_timeout_seconds: 300
 
 tools:
   enabled: "all"           # "all" | "readonly" | [ReadFile, Glob, Grep, ...]
   bash_timeout: 30          # Bash 工具默认超时(秒),max 600
   max_output_chars: 10000   # 单个工具返回内容上限
+
+# Optional MCP stdio servers. Servers are disabled until explicitly enabled
+# here and connected with `/mcp connect <name>`.
+mcp:
+  servers: []

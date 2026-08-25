@@ -10,29 +10,24 @@ MewCode is a terminal AI coding assistant built in Python, similar to Claude Cod
 
 ### Install Dependencies
 ```bash
-pip install textual httpx pyyaml rich
-pip install pytest pytest-asyncio  # dev only
+python -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
 ```
 
 ### Run the Application
-```powershell
-# Windows (recommended)
-.\start.ps1
-
-# Or manually
-$env:PYTHONPATH="E:\agent_class\project\src"
-python -c "from mewcode.tui.app import run_app; run_app(model='mimo-v2.5-pro', provider='custom')"
+```bash
+mewcode
+# Or
+python -m mewcode
 ```
 
 ### Run Tests
-```powershell
-$env:PYTHONPATH="E:\agent_class\project\src"
-python -m pytest tests/ -v
+```bash
+python -m pytest
 ```
 
 ### Run a Single Test
-```powershell
-$env:PYTHONPATH="E:\agent_class\project\src"
+```bash
 python -m pytest tests/test_e2e.py::TestAdapterFactory::test_detect_provider_openai -v
 ```
 
@@ -56,7 +51,12 @@ src/mewcode/
 │   │   ├── claude_adapter.py
 │   │   ├── ollama_adapter.py
 │   │   └── custom_adapter.py  # Generic OpenAI-compatible endpoint adapter
-│   └── conversation.py  # Conversation + ConversationManager (YAML persistence)
+│   ├── conversation.py  # Conversation + ConversationManager (YAML persistence)
+│   ├── context/         # Token budgeting, context planning, project memory
+│   ├── security/        # Optional approval, policy, and audit gateway
+│   ├── mcp/             # Foundation-only MCP adapters and configuration
+│   ├── extensions/      # Foundation-only commands, skills, and hooks
+│   └── orchestration/   # Foundation-only task, team, and worktree primitives
 └── tui/                 # Textual TUI layer
     ├── app.py           # MewCodeApp (main Textual App), run_app() entry
     └── widgets/
@@ -74,7 +74,7 @@ src/mewcode/
 
 ### TUI Flow
 
-1. `MewCodeApp` composes: Header → Vertical(ChatArea, InputBox) → StatusBar → Footer
+1. `MewCodeApp` composes: Header → Vertical(ChatArea, StatusBar, InputBox) → Footer
 2. User submits message via `InputSubmitted` event → `_handle_message()` or `_handle_command()`
 3. LLM processing runs in a Textual worker (`run_worker`) with `exclusive=True`
 4. Streaming: `chat_stream()` yields `StreamChunk` objects → `ChatArea.add_stream_chunk()` appends to a buffer → flushed as Markdown via Rich
@@ -85,7 +85,12 @@ Runtime config is in `config.yaml` at project root. Defines LLM models, session 
 
 ### Test Framework
 
-Tests use pytest with `asyncio_mode = "auto"` (configured in `pyproject.toml`). Test files are in `tests/`. The test suite covers `ConversationManager`, `AdapterFactory`, and `Message` data model serialization.
+Tests use pytest with `asyncio_mode = "auto"` (configured in `pyproject.toml`). Test files are in `tests/` and cover adapters, agent loops, tools, security, context planning, metrics, and TUI behavior.
+
+### Capability Status
+
+- Project context budgeting, project memory commands, and optional security approvals are integrated into the TUI.
+- MCP, Skills, Hooks, task orchestration, Worktrees, and Agent Teams currently provide foundation modules only; do not describe them as complete user workflows.
 
 ## Development Workflow
 

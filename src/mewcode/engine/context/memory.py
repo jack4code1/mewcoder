@@ -43,3 +43,14 @@ class ProjectMemoryStore:
             return False
         self.path.write_text(json.dumps([asdict(item) for item in kept], ensure_ascii=False), encoding="utf-8")
         return True
+
+    def search(self, query: str, limit: int = 10) -> list[MemoryRecord]:
+        terms = [term.casefold() for term in query.split() if term]
+        if not terms:
+            return []
+        ranked = []
+        for record in self.list():
+            score = sum(term in record.content.casefold() or term in record.kind.casefold() for term in terms)
+            if score:
+                ranked.append((score, record))
+        return [record for _, record in sorted(ranked, key=lambda item: item[0], reverse=True)[:limit]]

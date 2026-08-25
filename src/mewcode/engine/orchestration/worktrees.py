@@ -37,10 +37,35 @@ class WorktreeManager:
 
     def diff(self, task_id: str) -> str:
         lease = self.leases[task_id]
-        return self._git("-C", str(lease.path), "diff", lease.base_revision)
+        result = subprocess.run(
+            ["git", "-C", str(lease.path), "diff", lease.base_revision],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or "git diff failed")
+        return result.stdout
 
     def cleanup(self, task_id: str) -> None:
         lease = self.leases.pop(task_id, None)
         if lease is None:
             raise ValueError("unknown managed worktree")
-        self._git("worktree", "remove", str(lease.path))
+        # Leases are disposable task worktrees; their diff is collected before cleanup.
+        self._git("worktree", "remove", "--force", str(lease.path))
+
+    def apply(self, task_id: str) -> str:
+        """Apply a managed task diff to its clean source worktree, then clean up."""
+        lease = self.leases.get(task_id)
+        if lease is None:
+            raise ValueError("unknown managed worktree")
+        if self._git("status", "--porcelain"):
+            raise RuntimeError("main worktree is dirty")
+        diff = self.diff(task_id)
+        if not diff:
+            self.cleanup(task_id)
+            return ""
+        result = subprocess.run(["git", "apply", "--whitespace=nowarn", "-"], cwd=self.workspace, input=diff, capture_output=True, text=True)
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or "could not apply task diff")
+        self.cleanup(task_id)
+        return diff

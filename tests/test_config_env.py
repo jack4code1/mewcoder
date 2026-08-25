@@ -1,6 +1,6 @@
 """Tests for environment-first model API key resolution."""
 
-from mewcode.config import get_model_config
+from mewcode.config import get_mcp_servers, get_model_config
 
 
 def _config(api_key: str = "plain-key", api_key_env: str | None = None) -> dict:
@@ -66,3 +66,10 @@ def test_get_model_config_does_not_mutate_source_config(monkeypatch):
         config["llm"]["models"]["demo-model"]["api_key"]
         == "plain-key"
     )
+
+
+def test_get_mcp_servers_defaults_to_empty_and_parses_disabled_server():
+    assert get_mcp_servers({}) == []
+    server = get_mcp_servers({"mcp": {"servers": [{"name": "demo", "command": ["demo"]}]}})[0]
+    assert server["name"] == "demo"
+    assert server["enabled"] is False

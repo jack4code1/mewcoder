@@ -86,3 +86,19 @@ def get_tools_config(config: dict) -> dict[str, Any]:
     if isinstance(raw, dict):
         merged.update({k: v for k, v in raw.items() if v is not None})
     return merged
+
+
+def get_mcp_servers(config: dict) -> list[dict[str, Any]]:
+    """Return valid project-declared MCP stdio server definitions."""
+    raw = (config or {}).get("mcp", {}).get("servers", [])
+    if not isinstance(raw, list):
+        raise ValueError("mcp.servers must be a list")
+    servers = []
+    for item in raw:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ValueError("each MCP server needs a name")
+        command = item.get("command")
+        if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
+            raise ValueError(f"MCP server {item['name']} needs a command list")
+        servers.append({"name": item["name"], "command": command, "enabled": bool(item.get("enabled", False)), "timeout_seconds": item.get("timeout_seconds", 30)})
+    return servers

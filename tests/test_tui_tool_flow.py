@@ -117,6 +117,7 @@ async def test_missing_file_flow_returns_tool_error_and_final_reply():
 @pytest.mark.asyncio
 async def test_bash_flow_returns_output_and_final_reply():
     app = MewCodeApp()
+    app.execution_gateway = None
     async with app.run_test() as pilot:
         app.llm_client = FakeClient(
             [
@@ -156,6 +157,7 @@ async def test_bash_flow_returns_output_and_final_reply():
 @pytest.mark.asyncio
 async def test_second_response_tool_calls_continue_loop():
     app = MewCodeApp()
+    app.execution_gateway = None
     async with app.run_test() as pilot:
         app.llm_client = FakeClient(
             [

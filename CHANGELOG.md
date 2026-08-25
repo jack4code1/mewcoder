@@ -1,5 +1,127 @@
 # CHANGELOG
 
+## V0.17 - 2026-08-25 - Codex
+
+### Product workflow completion
+
+- Added configured MCP status and explicit connection commands.
+- Added searchable memory, explicit conversation summaries, and managed project Skills.
+- Added pre-write revisions, diff inspection, and rollback.
+- Added approval-forwarding isolated tasks with Worktree apply/discard review.
+- Final regression result: 252 tests passed.
+
+---
+
+## V0.16 - 2026-08-25 - Codex
+
+### Roadmap completion audit
+
+- Verified editable installation, both CLI entry points, documentation state,
+  and formatting checks.
+- Added end-to-end MCP manager registration coverage.
+- Completed the controlled task/Worktree and MCP stdio roadmap phases.
+- Final regression result: 244 tests passed.
+
+---
+
+## V0.15 - 2026-08-25 - Codex
+
+### Isolated task and Worktree execution
+
+- Added disposable Worktree task execution with retained review diffs.
+- Ensured managed Worktrees clean up modified task directories after diff
+  collection.
+- Added bounded team execution and overlapping-context rejection.
+- Added temporary Git repository coverage; verified 243 tests.
+
+---
+
+## V0.14 - 2026-08-25 - Codex
+
+### MCP stdio client
+
+- Added newline-delimited JSON-RPC stdio initialization, tool discovery, and
+  tool-call support.
+- Registered discovered tools with server-scoped names to prevent collisions.
+- Kept MCP adapters classified as high-risk external tools for the execution
+  gateway.
+- Added a local fake-server protocol test; verified 241 tests.
+
+---
+
+## V0.13 - 2026-08-25 - Codex
+
+### Approval-gated project Hooks
+
+- Added `.mewcode/hooks.yaml` discovery for `task_start` and `task_complete`.
+- Routed Hook Bash commands through the existing security gateway.
+- Kept unapproved Hooks blocking and non-executing by default.
+- Added Hook loader and authorization coverage; verified 240 tests.
+
+---
+
+## V0.12 - 2026-08-25 - Codex
+
+### Consistent slash command catalog
+
+- Added missing approval and request-resolution command metadata.
+- Generated `/help` from the command catalog used by completion.
+- Added command catalog regression coverage; verified 238 tests.
+
+---
+
+## V0.11 - 2026-08-25 - Codex
+
+### File-based project Skills
+
+- Added automatic Markdown Skill discovery from `.mewcode/skills/`.
+- Injected active Skills as labelled system context before conversation history.
+- Added `/skills` and command-completion metadata for active Skill inspection.
+- Added discovery and TUI coverage; verified 237 tests.
+
+---
+
+## V0.10 - 2026-08-25 - Codex
+
+### Usable project memory context
+
+- Made `/memory` display the stable record ID and kind required by `/forget`.
+- Moved project memory system messages ahead of conversation history for every
+  model request.
+- Added TUI and request-order regression coverage; verified 235 tests.
+
+---
+
+## V0.9 - 2026-08-25 - Codex
+
+### Safe-by-default tool execution
+
+- Enabled the existing execution gateway in the shipped configuration.
+- Kept reads and searches automatic while writes, edits, and commands require
+  explicit approval by default.
+- Added regression coverage for default TUI gateway initialization.
+- Isolated legacy no-gateway Agent Loop tests from the new default while
+  preserving dedicated approval-flow coverage.
+- Updated safety documentation and verified 233 tests.
+
+---
+
+## V0.8 - 2026-08-25 - Codex
+
+### Engineering baseline and documentation alignment
+
+- Added an editable-install development workflow through `pip install -e ".[dev]"`.
+- Added a GitHub Actions test matrix for Python 3.10 through 3.13.
+- Added `python -m mewcode` as an alias for the existing CLI entry point.
+- Updated README, manual, contributor guidance, and roadmap status to match
+  integrated context, project-memory, and opt-in security behavior.
+- Documented MCP, Skills, Hooks, task orchestration, Worktrees, and Agent
+  Teams as foundations pending end-to-end application integration.
+- Verified package import, both CLI entry points, and 232 tests in a clean
+  editable environment.
+
+---
+
 ## V0.7.1 - 2026-06-11 - Codex
 
 ### UI layout regression fix - 06.1-ui-fix
