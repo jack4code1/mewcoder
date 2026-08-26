@@ -95,6 +95,19 @@ def test_memory_persists_vector_and_returns_relevant_records(tmp_path):
     assert store.relevant("run Python tests")[0].id == record.id
 
 
+def test_approved_corrected_memory_supersedes_old_claim(tmp_path):
+    store = ProjectMemoryStore(tmp_path)
+    old = store.save(MemoryRecord("Tests use unittest"))
+    correction = store.save(MemoryRecord(
+        "Tests use pytest", source="auto", status="pending", supersedes=[old.id]
+    ))
+
+    store.approve(correction.id)
+
+    assert store.list("active")[0].id == correction.id
+    assert store.list("superseded")[0].id == old.id
+
+
 def test_review_requires_an_explicit_final_pass_verdict():
     assert review_passed("Tests passed\nVERDICT: PASS")
     assert not review_passed("Tests passed but inspect later")

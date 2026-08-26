@@ -29,7 +29,8 @@ def test_project_memory_precedes_conversation_history(tmp_path):
 
     assert messages[0].role is MessageRole.SYSTEM
     assert messages[1].content == "Project memory (fact): Repository uses pytest"
-    assert messages[2].role is MessageRole.USER
+    assert messages[2].content.startswith("Structured session state")
+    assert messages[3].role is MessageRole.USER
 
 
 def test_memory_search_ranks_matching_records(tmp_path):
@@ -59,5 +60,5 @@ async def test_summarize_command_replaces_older_history():
 
     messages = app.conversation_manager.get_messages()
     assert messages[0].role is MessageRole.SYSTEM
-    assert "Conversation summary" in messages[0].content
+    assert "Historical summary schema v1" in messages[0].content
     assert len(messages) == 9

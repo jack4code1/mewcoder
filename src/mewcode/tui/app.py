@@ -21,7 +21,7 @@ from ..engine.security.gateway import ExecutionGateway
 from ..engine.security.audit import AuditLog
 from ..engine.security.revisions import RevisionStore
 from ..engine.runtime import ProjectRuntime
-from ..engine.context import ContextItem, ProjectMemoryStore, embed_with_provider, plan_context
+from ..engine.context import ContextItem, ProjectMemoryStore, build_session_state, compact_tool_results_for_context, embed_with_provider, plan_context
 from ..engine.context import MemoryRecord
 from ..engine.context import compress_messages
 from ..engine.extensions import ProjectHookStore, ProjectSkillStore, SkillRunner
@@ -647,6 +647,11 @@ class MewCodeApp(App):
                     max_concurrency=1,
                     failure_policy=lambda _task, _plan: TaskFailureAction.REPLAN,
                 ).run(plan, worker)
+                active = self.conversation_manager.get_active_conversation()
+                if active is not None:
+                    active.context_metadata["workflow_status"] = {
+                        task.id: task.status for task in plan.tasks
+                    }
                 if plan.outcome != "replan_required":
                     break
                 recovery_context = (
@@ -793,7 +798,13 @@ class MewCodeApp(App):
         into the conversation history."""
         sys_text = build_system_prompt(self.tool_context, self.tool_registry)
         sys_msg = Message(role=MessageRole.SYSTEM, content=sys_text)
-        user_messages = [message.content for message in self.conversation_manager.get_messages() if message.role is MessageRole.USER]
+        conversation_messages = self.conversation_manager.get_messages()
+        active = self.conversation_manager.get_active_conversation()
+        workflow_status = (active.context_metadata.get("workflow_status") or {}) if active else {}
+        session_state = build_session_state(conversation_messages, workflow_status)
+        if active is not None:
+            active.context_metadata["structured_session_state"] = session_state.to_dict()
+        user_messages = [message.content for message in conversation_messages if message.role is MessageRole.USER]
         retrieved = (
             self.memory_store.relevant_vector(self._memory_query_vector, user_messages[-1], limit=8)
             if self._memory_query_vector is not None and user_messages
@@ -807,7 +818,9 @@ class MewCodeApp(App):
             Message(MessageRole.SYSTEM, f"Project skill ({item.source}): {item.content}")
             for item in self.skill_runner.context_items(self.skill_store.list())
         ]
-        return [sys_msg] + skills + memories + self.conversation_manager.get_messages()
+        state_message = Message(MessageRole.SYSTEM, session_state.to_prompt())
+        request_history = compact_tool_results_for_context(conversation_messages)
+        return [sys_msg] + skills + memories + [state_message] + request_history
 
     def _context_summary(self) -> str:
         messages = self._messages_with_system()
@@ -1000,9 +1013,11 @@ class MewCodeApp(App):
                 f"{message.role.value}: {message.content[:1200]}"
                 for message in self.conversation_manager.get_messages()[-12:]
             )
+            active_records = self.memory_store.list("active")
+            known_memories = "\n".join(f"- {item.id}: {item.content}" for item in active_records)
             response = await self.llm_client.chat([
-                Message(MessageRole.SYSTEM, "Extract only durable project facts, conventions, or decisions. Return JSON array objects with content, kind, and confidence (0-1). Return [] for no durable facts. Do not include secrets."),
-                Message(MessageRole.USER, f"Task: {task}\n\nOutcome and tool evidence:\n{transcript}"),
+                Message(MessageRole.SYSTEM, "Extract only durable project facts or conventions supported by the tool evidence. Return JSON array objects with content, kind, confidence (0-1), and supersedes (array of old memory IDs). Historical decisions are fallible: include supersedes only when new code, test, or tool evidence explicitly refutes an old memory. Return [] for no durable facts. Do not include secrets."),
+                Message(MessageRole.USER, f"Task: {task}\n\nActive memories:\n{known_memories or 'none'}\n\nOutcome and tool evidence:\n{transcript}"),
             ])
             raw = response.content.strip()
             if raw.startswith("```"):
@@ -1011,14 +1026,18 @@ class MewCodeApp(App):
             if not isinstance(facts, list):
                 return
             existing = {item.content for item in self.memory_store.list()}
+            active_ids = {item.id for item in active_records}
             candidates = []
             for fact in facts[:5]:
                 if not isinstance(fact, dict):
                     continue
                 value = fact.get("content")
                 confidence = fact.get("confidence", 0)
+                supersedes = fact.get("supersedes", [])
+                if not isinstance(supersedes, list) or not all(isinstance(item, str) for item in supersedes):
+                    supersedes = []
                 if isinstance(value, str) and 4 <= len(value.strip()) <= 300 and value not in existing and isinstance(confidence, (int, float)) and confidence >= 0.5:
-                    candidates.append(MemoryRecord(value.strip(), kind=str(fact.get("kind", "fact"))[:40], source="auto", confidence=float(confidence), status="pending"))
+                    candidates.append(MemoryRecord(value.strip(), kind=str(fact.get("kind", "fact"))[:40], source="auto", confidence=float(confidence), status="pending", supersedes=[item for item in supersedes if item in active_ids]))
             vectors = await embed_with_provider([item.content for item in candidates], memory_config.get("embedding") or {})
             for index, record in enumerate(candidates):
                 if vectors is not None:

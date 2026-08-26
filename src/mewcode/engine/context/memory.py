@@ -10,7 +10,7 @@ import os
 from typing import Any
 
 import httpx
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
@@ -25,6 +25,7 @@ class MemoryRecord:
     confidence: float = 1.0
     status: str = "active"
     created_at: str = ""
+    supersedes: list[str] = field(default_factory=list)  # IDs of historical records this evidence corrects
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -84,6 +85,10 @@ class ProjectMemoryStore:
         if record is None:
             return None
         record.status = "active"
+        superseded = set(record.supersedes)
+        for item in records:
+            if item.id in superseded and item.status == "active":
+                item.status = "superseded"
         self._write(records)
         return record
 
