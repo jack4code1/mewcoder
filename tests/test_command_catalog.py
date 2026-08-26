@@ -7,3 +7,7 @@ def test_catalog_includes_all_approval_command_forms():
     assert "/approve-request" in names
     assert "/approve-project-request" in names
     assert "/deny-request" in names
+
+
+def test_catalog_omits_retired_model_switch_command():
+    assert "/model" not in CommandCatalog().names()

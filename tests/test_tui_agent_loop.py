@@ -1,5 +1,6 @@
 import pytest
 
+from mewcode.engine.conversation import ConversationManager
 from mewcode.engine.models import StreamChunk, ToolCall
 from mewcode.tui.app import MewCodeApp
 
@@ -29,8 +30,9 @@ async def _run_message(app: MewCodeApp, pilot, content: str) -> list:
 
 
 @pytest.mark.asyncio
-async def test_tui_consumes_agent_loop_events_for_multiple_tool_rounds():
+async def test_tui_consumes_agent_loop_events_for_multiple_tool_rounds(tmp_path):
     app = MewCodeApp()
+    app.conversation_manager = ConversationManager(str(tmp_path))
     app.execution_gateway = None
     async with app.run_test() as pilot:
         app.llm_client = FakeClient(

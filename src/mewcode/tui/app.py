@@ -29,11 +29,15 @@ from ..engine.extensions import CommandCatalog
 from ..engine.models import Message, MessageRole, TokenUsage
 from ..engine.orchestration import (
     AgentAssignment,
+    AgentRuntime,
+    AgentTask,
     CollaborativeRunner,
     PlanExecutor,
     PlanStep,
     PlanTask,
     TaskScheduler,
+    TaskResult,
+    TaskStatus,
     TaskFailureAction,
     allowed_tools_for_role,
     TaskRunner,
@@ -136,7 +140,6 @@ class MewCodeApp(App):
         Binding("ctrl+c", "quit", "Quit"),
         Binding("ctrl+l", "clear_screen", "Clear"),
         Binding("ctrl+s", "save_session", "Save"),
-        Binding("ctrl+o", "switch_model", "Model"),
         Binding("ctrl+t", "toggle_mode", "Mode"),
         Binding("ctrl+shift+c", "copy_last_reply", "Copy"),
         Binding("escape", "cancel_agent", "Cancel"),
@@ -207,8 +210,9 @@ class MewCodeApp(App):
 
     def on_mount(self) -> None:
         """Initialize on mount"""
-        # Create initial conversation
-        self.conversation_manager.create_conversation()
+        restored = self._restore_latest_conversation()
+        if not restored:
+            self.conversation_manager.create_conversation()
 
         # Update status bar
         status_bar = self.query_one("#status-bar", StatusBar)
@@ -217,19 +221,90 @@ class MewCodeApp(App):
 
         # Show welcome message
         chat_area = self.query_one("#chat-area", ChatArea)
-        chat_area.add_system_message("Welcome to MewCode! Type your message or /help for commands.")
+        if restored:
+            self._render_active_conversation(chat_area)
+            active = self.conversation_manager.get_active_conversation()
+            chat_area.add_system_message("Welcome to MewCode! Type your message or /help for commands.")
+            chat_area.add_system_message(
+                f"Resumed session {active.id[:8]}. Use /sessions to list saved sessions."
+            )
+        else:
+            chat_area.add_system_message("Welcome to MewCode! Type your message or /help for commands.")
 
         # Input is empty at startup -> status bar hidden until the user types.
         status_bar.hide()
 
     async def on_unmount(self) -> None:
         """App closing — release LLM client resources"""
+        self._auto_save_active_conversation()
         if self.llm_client is not None:
             try:
                 await self.llm_client.close()
             except Exception:
                 pass
         await self.mcp_manager.close()
+
+    def _session_config(self) -> dict:
+        raw = self.config.get("session") or {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _auto_save_active_conversation(self) -> None:
+        if self._session_config().get("auto_save", True):
+            if not self.conversation_manager.save_conversation():
+                logger.warning("Could not auto-save active conversation")
+
+    def _restore_latest_conversation(self) -> bool:
+        """Load saved conversations and select the most recently updated one."""
+        self.conversation_manager.load_all_conversations()
+        if not self._session_config().get("restore_last", True):
+            return False
+        conversations = self.conversation_manager.conversations.values()
+        if not conversations:
+            return False
+        latest = max(conversations, key=lambda item: item.updated_at)
+        return self.conversation_manager.set_active_conversation(latest.id)
+
+    def _render_active_conversation(self, chat_area: ChatArea) -> None:
+        """Render persisted conversational messages without duplicating tool traces."""
+        chat_area.clear()
+        for message in self.conversation_manager.get_messages():
+            if message.role is MessageRole.USER:
+                chat_area.add_user_message(message.content)
+            elif message.role is MessageRole.ASSISTANT:
+                chat_area.add_assistant_message(message.content)
+            elif message.role is MessageRole.SYSTEM:
+                chat_area.add_system_message(message.content)
+
+    def _resume_conversation(self, requested_id: str) -> str:
+        """Switch to a loaded saved conversation by full or unambiguous short ID."""
+        requested_id = requested_id.strip().casefold()
+        matches = [
+            conversation_id
+            for conversation_id in self.conversation_manager.conversations
+            if conversation_id.casefold().startswith(requested_id)
+        ]
+        if not requested_id:
+            return "Usage: /resume <session-id>"
+        if not matches:
+            return "No saved session matches that ID. Use /sessions to list sessions."
+        if len(matches) > 1:
+            return "Session ID is ambiguous. Use more characters from /sessions."
+        self.conversation_manager.set_active_conversation(matches[0])
+        self._render_active_conversation(self.query_one("#chat-area", ChatArea))
+        return f"Resumed session {matches[0][:8]}."
+
+    def _saved_session_lines(self) -> list[str]:
+        active_id = self.conversation_manager.active_conversation_id
+        conversations = sorted(
+            self.conversation_manager.conversations.values(),
+            key=lambda item: item.updated_at,
+            reverse=True,
+        )
+        return [
+            f"- {item.id[:8]}{' (active)' if item.id == active_id else ''}: "
+            f"{item.title} — {len(item.messages)} messages, updated {item.updated_at:%Y-%m-%d %H:%M}"
+            for item in conversations
+        ]
 
     def on_input_submitted(self, event: InputSubmitted) -> None:
         """Handle input submission"""
@@ -490,8 +565,15 @@ class MewCodeApp(App):
             chat_area.add_system_message("Chat cleared.")
         elif command == "/save":
             self.action_save_session()
-        elif command == "/model":
-            self.action_switch_model()
+        elif command == "/sessions":
+            lines = self._saved_session_lines()
+            chat_area.add_system_message(
+                "Saved sessions:\n" + "\n".join(lines)
+                if lines else "No saved sessions."
+            )
+        elif command.startswith("/resume"):
+            result = self._resume_conversation(command.removeprefix("/resume").strip())
+            chat_area.add_system_message(result)
         elif command == "/mode":
             self.action_toggle_mode()
         elif command == "/quit":
@@ -611,26 +693,52 @@ class MewCodeApp(App):
         text = ""
         enabled_before = {tool.name for tool in self.tool_registry.list_enabled()}
         permitted = allowed_tools_for_role(role, enabled_before, task_requested_tools)
-        self.tool_registry.enable(permitted)
-        try:
-            async for event in run_agent_loop(
-                llm_client=self.llm_client,
-                conversation_manager=manager,
-                tool_registry=self.tool_registry,
-                tools_payload=self._build_tools_payload(),
-                build_messages=lambda: [
-                    Message(MessageRole.SYSTEM, build_system_prompt(self.tool_context, self.tool_registry)),
-                    Message(MessageRole.SYSTEM, f"You are the {role} agent. Shared board:\n{board}"),
-                ] + manager.get_messages(),
-                execution_gateway=self.execution_gateway,
-                context_budget=self.project_runtime.context_budget,
-            ):
-                if event.event_type == AgentEventType.STREAM_TEXT:
-                    text += event.text
-                elif event.event_type == AgentEventType.APPROVAL_REQUIRED and event.request_id:
-                    self._show_approval_dialog(event.request_id, event.tool_name or "tool", event.summary, event.approval)
-        finally:
-            self.tool_registry.enable(enabled_before)
+        task = AgentTask(
+            goal=objective,
+            role=role,
+            allowed_tools=sorted(permitted),
+            max_retries=0,
+        )
+        runtime = AgentRuntime(
+            agent_id=f"{role}-{task.task_id}",
+            role=role,
+            capabilities=set(permitted),
+            conversation=manager,
+            allowed_tools=set(permitted),
+        )
+
+        async def execute(agent: AgentRuntime, _task: AgentTask, _view: dict) -> TaskResult:
+            nonlocal text
+            token_count = 0
+            self.tool_registry.enable(permitted)
+            try:
+                async for event in run_agent_loop(
+                    llm_client=self.llm_client,
+                    conversation_manager=manager,
+                    tool_registry=self.tool_registry,
+                    tools_payload=self._build_tools_payload(),
+                    build_messages=lambda: [
+                        Message(MessageRole.SYSTEM, build_system_prompt(self.tool_context, self.tool_registry)),
+                        Message(MessageRole.SYSTEM, f"You are the {role} agent. Shared task view:\n{board}"),
+                    ] + manager.get_messages(),
+                    max_iterations=agent.step_budget,
+                    cancel_event=self._agent_cancel_event,
+                    execution_gateway=self.execution_gateway,
+                    context_budget=self.project_runtime.context_budget,
+                ):
+                    if event.event_type == AgentEventType.STREAM_TEXT:
+                        text += event.text
+                    elif event.event_type == AgentEventType.USAGE and event.usage is not None:
+                        token_count = max(token_count, event.usage.total_tokens)
+                    elif event.event_type == AgentEventType.APPROVAL_REQUIRED and event.request_id:
+                        self._show_approval_dialog(event.request_id, event.tool_name or "tool", event.summary, event.approval)
+                return TaskResult(TaskStatus.COMPLETED, text, token_count=token_count)
+            finally:
+                self.tool_registry.enable(enabled_before)
+
+        result = await runtime.run(task, {"shared_summary": board}, execute, self._agent_cancel_event)
+        if result.status is not TaskStatus.COMPLETED:
+            raise RuntimeError(result.error or f"{role} agent did not complete")
         if not text:
             text = manager.get_messages()[-1].content if manager.get_messages() else "No result"
         return text
@@ -743,6 +851,7 @@ class MewCodeApp(App):
         # Add to conversation manager
         user_message = Message(role=MessageRole.USER, content=content)
         self.conversation_manager.add_message(user_message)
+        self._auto_save_active_conversation()
 
         routing = (self.config.get("agent") or {}).get("routing") or {}
         if routing.get("llm_router", True):
@@ -1007,6 +1116,7 @@ class MewCodeApp(App):
             status_bar.update_agent_status("Error")
 
         finally:
+            self._auto_save_active_conversation()
             self.is_processing = False
             self._agent_cancel_event = None
             self._memory_query_vector = None
@@ -1078,13 +1188,10 @@ class MewCodeApp(App):
 
     def action_save_session(self) -> None:
         """Save current session"""
-        self.conversation_manager.save_conversation()
-        self.notify("Session saved")
-
-    def action_switch_model(self) -> None:
-        """Switch LLM model"""
-        # TODO: Implement model switching dialog
-        self.notify("Model switching not implemented yet")
+        if self.conversation_manager.save_conversation():
+            self.notify("Session saved")
+        else:
+            self.notify("No active session to save")
 
     def action_toggle_mode(self) -> None:
         """Toggle between chat and single mode"""

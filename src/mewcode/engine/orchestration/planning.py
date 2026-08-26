@@ -10,6 +10,8 @@ from fnmatch import fnmatchcase
 from typing import Awaitable, Callable
 from uuid import uuid4
 
+from .tool_policy import ROLE_TOOL_POLICY
+
 
 @dataclass
 class PlanStep:
@@ -114,6 +116,15 @@ def parse_task_plan(raw: str, objective: str, available_tools: set[str]) -> Task
         if task.id in task.depends_on or not set(task.depends_on) <= ids:
             raise ValueError(f"task {task.id} has invalid dependencies")
     _validate_acyclic(tasks)
+    for task in tasks:
+        role_tools = ROLE_TOOL_POLICY.get(task.role.casefold())
+        if role_tools is None:
+            raise ValueError(f"task {task.id} has an unknown role: {task.role}")
+        excess = set(task.allowed_tools) - role_tools
+        if excess:
+            raise ValueError(
+                f"task {task.id} requests tools outside role policy: {', '.join(sorted(excess))}"
+            )
     return TaskPlan(objective, tasks)
 
 

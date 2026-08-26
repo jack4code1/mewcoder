@@ -32,6 +32,7 @@ llm:
 session:
   storage_dir: "~/.mewcode/sessions"
   auto_save: true
+  restore_last: true
 
 # Automatically use planning only for clearly multi-step coding tasks.
 agent:
