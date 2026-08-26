@@ -8,6 +8,7 @@ from mewcode.engine.orchestration import (
     PlanStep,
     TaskFailureAction,
     TaskScheduler,
+    allowed_tools_for_role,
     parse_task_plan,
     review_passed,
 )
@@ -112,6 +113,18 @@ def test_review_requires_an_explicit_final_pass_verdict():
     assert review_passed("Tests passed\nVERDICT: PASS")
     assert not review_passed("Tests passed but inspect later")
     assert not review_passed("VERDICT: FIX")
+
+
+def test_role_tool_policy_intersects_role_task_and_registry_permissions():
+    registry_enabled = {"Glob", "Grep", "ReadFile", "EditFile", "WriteFile", "Bash", "Diff"}
+
+    assert allowed_tools_for_role("implementer", registry_enabled, {"ReadFile", "EditFile", "Bash"}) == {
+        "ReadFile", "EditFile"
+    }
+    assert allowed_tools_for_role("reviewer", registry_enabled, {"ReadFile", "Diff", "Bash"}) == {
+        "ReadFile", "Diff"
+    }
+    assert allowed_tools_for_role("tester", registry_enabled) == {"ReadFile", "Bash"}
 
 
 @pytest.mark.asyncio

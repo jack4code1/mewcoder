@@ -46,6 +46,16 @@ class UnsafeTool(Tool):
         return ToolResult(content="unsafe")
 
 
+class FailingTool(Tool):
+    name = "Failing"
+    description = "Always returns a recoverable error."
+    input_schema = {"type": "object"}
+    is_read_only = True
+
+    async def execute(self, ctx: ToolContext, input: dict) -> ToolResult:
+        return ToolResult(content=f"missing: {input.get('path')}", is_error=True)
+
+
 def _workspace_test_dir() -> Path:
     path = Path.cwd() / ".mewcode_test_sessions" / uuid4().hex
     path.mkdir(parents=True, exist_ok=True)
@@ -63,6 +73,7 @@ def _registry() -> ToolRegistry:
     registry = ToolRegistry(ToolContext.detect(Path.cwd()))
     registry.register(EchoTool())
     registry.register(UnsafeTool())
+    registry.register(FailingTool())
     return registry
 
 
@@ -204,6 +215,29 @@ async def test_repeated_unknown_tool_stops():
     assert client.calls == 3
     assert events[-1].stop_reason == AgentStopReason.REPEATED_INVALID_TOOLS
     assert any(e.event_type == AgentEventType.ERROR for e in events)
+
+
+@pytest.mark.asyncio
+async def test_repeated_same_recoverable_tool_failure_stops():
+    manager = _manager()
+    registry = _registry()
+    client = FakeClient([
+        [StreamChunk(content="", model="fake", tool_calls=[ToolCall("f1", "Failing", {"path": "missing.py"})])],
+        [StreamChunk(content="", model="fake", tool_calls=[ToolCall("f2", "Failing", {"path": "missing.py"})])],
+        [StreamChunk(content="", model="fake", tool_calls=[ToolCall("f3", "Failing", {"path": "missing.py"})])],
+    ])
+
+    events = await _collect(run_agent_loop(
+        llm_client=client,
+        conversation_manager=manager,
+        tool_registry=registry,
+        tools_payload=[],
+        build_messages=lambda: _messages(manager),
+        repeated_tool_failure_limit=3,
+    ))
+
+    assert client.calls == 3
+    assert events[-1].stop_reason == AgentStopReason.REPEATED_TOOL_FAILURES
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass
 from typing import AsyncIterator, Callable, Optional
@@ -45,6 +46,11 @@ def summarize_tool_result(content: str) -> str:
         return ""
     line = content.splitlines()[0].strip()
     return line[:80] + ("..." if len(line) > 80 else "")
+
+
+def tool_call_fingerprint(call: ToolCall) -> str:
+    """Stable identity used to detect an unproductive repeated failure."""
+    return f"{call.name}:{json.dumps(call.input, sort_keys=True, default=str, separators=(',', ':'))}"
 
 
 @dataclass
@@ -163,6 +169,7 @@ async def run_agent_loop(
     build_messages: Callable[[], list[Message]],
     max_iterations: int = 50,
     invalid_tool_limit: int = 3,
+    repeated_tool_failure_limit: int = 3,
     max_concurrency: int = 4,
     cancel_event: Optional[asyncio.Event] = None,
     execution_gateway: ExecutionGateway | None = None,
@@ -177,6 +184,8 @@ async def run_agent_loop(
     """
     total_usage = conversation_manager.get_token_usage()
     consecutive_invalid_tools = 0
+    last_failed_action = ""
+    repeated_failures = 0
 
     if hook_runner is not None:
         for hook in await hook_runner.run("task_start"):
@@ -316,6 +325,23 @@ async def run_agent_loop(
                     )
                     yield AgentEvent.loop_complete(
                         turn_index, AgentStopReason.REPEATED_INVALID_TOOLS
+                    )
+                    return
+
+                if result.is_error:
+                    action = tool_call_fingerprint(call)
+                    repeated_failures = repeated_failures + 1 if action == last_failed_action else 1
+                    last_failed_action = action
+                else:
+                    repeated_failures = 0
+                    last_failed_action = ""
+
+                if repeated_failures >= max(1, repeated_tool_failure_limit):
+                    yield AgentEvent.error(
+                        "Agent stopped after repeated failures for the same tool action."
+                    )
+                    yield AgentEvent.loop_complete(
+                        turn_index, AgentStopReason.REPEATED_TOOL_FAILURES
                     )
                     return
 

@@ -7,5 +7,6 @@ from .planning import ExecutionPlan, PlanExecutor, PlanStep, PlanTask, TaskFailu
 from .collaboration import AgentAssignment, CollaborativeRunner, SharedTaskBoard, review_passed
 from .routing import ExecutionSignals, IntentDecision, LLMRouter, classify_intent, escalation_target, parse_route_result
 from .dispatcher import RouteDispatcher
+from .tool_policy import ROLE_TOOL_POLICY, allowed_tools_for_role
 
-__all__ = ["TaskRun", "TaskRunner", "TaskSpec", "TeamCoordinator", "WorktreeLease", "WorktreeManager", "ExecutionPlan", "PlanExecutor", "PlanStep", "PlanTask", "TaskFailureAction", "TaskPlan", "TaskScheduler", "parse_task_plan", "AgentAssignment", "CollaborativeRunner", "SharedTaskBoard", "review_passed", "ExecutionSignals", "IntentDecision", "LLMRouter", "RouteDispatcher", "classify_intent", "escalation_target", "parse_route_result"]
+__all__ = ["TaskRun", "TaskRunner", "TaskSpec", "TeamCoordinator", "WorktreeLease", "WorktreeManager", "ExecutionPlan", "PlanExecutor", "PlanStep", "PlanTask", "TaskFailureAction", "TaskPlan", "TaskScheduler", "parse_task_plan", "AgentAssignment", "CollaborativeRunner", "SharedTaskBoard", "review_passed", "ExecutionSignals", "IntentDecision", "LLMRouter", "RouteDispatcher", "ROLE_TOOL_POLICY", "allowed_tools_for_role", "classify_intent", "escalation_target", "parse_route_result"]

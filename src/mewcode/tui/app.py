@@ -35,6 +35,7 @@ from ..engine.orchestration import (
     PlanTask,
     TaskScheduler,
     TaskFailureAction,
+    allowed_tools_for_role,
     TaskRunner,
     TaskSpec,
     WorktreeManager,
@@ -588,7 +589,7 @@ class MewCodeApp(App):
 
     async def _plan_tasks(self, objective: str, recovery_context: str = ""):
         response = await self.llm_client.chat([
-            Message(MessageRole.SYSTEM, "Create a coding task graph. Return only JSON: {\"tasks\":[{\"id\":\"t1\",\"description\":\"...\",\"role\":\"researcher|implementer|reviewer\",\"depends_on\":[],\"files\":[],\"allowed_tools\":[\"ReadFile\",\"Glob\",\"Grep\",\"WriteFile\",\"EditFile\",\"Bash\"]}]}. Use 2-6 tasks. Dependencies must reference prior task IDs. Choose the minimum tools required. On recovery, preserve completed work and replace only failed or blocked work."),
+            Message(MessageRole.SYSTEM, "Create a coding task graph. Return only JSON: {\"tasks\":[{\"id\":\"t1\",\"description\":\"...\",\"role\":\"researcher|implementer|tester|reviewer\",\"depends_on\":[],\"files\":[],\"allowed_tools\":[\"ReadFile\",\"Glob\",\"Grep\",\"WriteFile\",\"EditFile\",\"Bash\",\"Diff\"]}]}. Use 2-6 tasks. Dependencies must reference prior task IDs. Choose the minimum tools required. On recovery, preserve completed work and replace only failed or blocked work."),
             Message(MessageRole.USER, f"Objective: {objective}\nRecovery context: {recovery_context or 'none'}"),
         ])
         return parse_task_plan(
@@ -597,27 +598,39 @@ class MewCodeApp(App):
             {tool.name for tool in self.tool_registry.list_enabled()},
         )
 
-    async def _run_subagent(self, objective: str, role: str = "executor", board: str = "") -> str:
+    async def _run_subagent(
+        self,
+        objective: str,
+        role: str = "executor",
+        board: str = "",
+        task_requested_tools: set[str] | None = None,
+    ) -> str:
         manager = ConversationManager()
         manager.create_conversation()
         manager.add_message(Message(MessageRole.USER, objective))
         text = ""
-        async for event in run_agent_loop(
-            llm_client=self.llm_client,
-            conversation_manager=manager,
-            tool_registry=self.tool_registry,
-            tools_payload=self._build_tools_payload(),
-            build_messages=lambda: [
-                Message(MessageRole.SYSTEM, build_system_prompt(self.tool_context, self.tool_registry)),
-                Message(MessageRole.SYSTEM, f"You are the {role} agent. Shared board:\n{board}"),
-            ] + manager.get_messages(),
-            execution_gateway=self.execution_gateway,
-            context_budget=self.project_runtime.context_budget,
-        ):
-            if event.event_type == AgentEventType.STREAM_TEXT:
-                text += event.text
-            elif event.event_type == AgentEventType.APPROVAL_REQUIRED and event.request_id:
-                self._show_approval_dialog(event.request_id, event.tool_name or "tool", event.summary, event.approval)
+        enabled_before = {tool.name for tool in self.tool_registry.list_enabled()}
+        permitted = allowed_tools_for_role(role, enabled_before, task_requested_tools)
+        self.tool_registry.enable(permitted)
+        try:
+            async for event in run_agent_loop(
+                llm_client=self.llm_client,
+                conversation_manager=manager,
+                tool_registry=self.tool_registry,
+                tools_payload=self._build_tools_payload(),
+                build_messages=lambda: [
+                    Message(MessageRole.SYSTEM, build_system_prompt(self.tool_context, self.tool_registry)),
+                    Message(MessageRole.SYSTEM, f"You are the {role} agent. Shared board:\n{board}"),
+                ] + manager.get_messages(),
+                execution_gateway=self.execution_gateway,
+                context_budget=self.project_runtime.context_budget,
+            ):
+                if event.event_type == AgentEventType.STREAM_TEXT:
+                    text += event.text
+                elif event.event_type == AgentEventType.APPROVAL_REQUIRED and event.request_id:
+                    self._show_approval_dialog(event.request_id, event.tool_name or "tool", event.summary, event.approval)
+        finally:
+            self.tool_registry.enable(enabled_before)
         if not text:
             text = manager.get_messages()[-1].content if manager.get_messages() else "No result"
         return text
@@ -629,16 +642,12 @@ class MewCodeApp(App):
             if not self._ensure_llm_client():
                 return
             async def worker(task: PlanTask, task_plan) -> str:
-                enabled_before = [tool.name for tool in self.tool_registry.list_enabled()]
-                self.tool_registry.enable(task.allowed_tools)
-                try:
-                    return await self._run_subagent(
-                        task.description,
-                        task.role,
-                        task_plan.summary() + f"\nTask tools: {', '.join(task.allowed_tools) or 'none'}",
-                    )
-                finally:
-                    self.tool_registry.enable(enabled_before)
+                return await self._run_subagent(
+                    task.description,
+                    task.role,
+                    task_plan.summary() + f"\nTask tools: {', '.join(task.allowed_tools) or 'none'}",
+                    set(task.allowed_tools),
+                )
 
             recovery_context = ""
             for replan_attempt in range(2):

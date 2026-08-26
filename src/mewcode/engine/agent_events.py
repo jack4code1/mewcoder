@@ -31,6 +31,7 @@ class AgentStopReason(str, Enum):
     MAX_ITERATIONS = "max_iterations"
     CANCELLED = "cancelled"
     REPEATED_INVALID_TOOLS = "repeated_invalid_tools"
+    REPEATED_TOOL_FAILURES = "repeated_tool_failures"
     ERROR = "error"
 
 

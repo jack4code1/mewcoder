@@ -14,6 +14,7 @@ from .edit_file import EditFileTool
 from .bash import BashTool
 from .glob import GlobTool
 from .grep import GrepTool
+from .diff import DiffTool
 from .system_prompt import build_system_prompt
 
 
@@ -29,6 +30,7 @@ __all__ = [
     "BashTool",
     "GlobTool",
     "GrepTool",
+    "DiffTool",
     "build_system_prompt",
     "build_default_registry",
 ]
@@ -41,13 +43,14 @@ _BUILTIN_TOOL_CLASSES = (
     BashTool,
     GlobTool,
     GrepTool,
+    DiffTool,
 )
 
 
 def build_default_registry(
     ctx: ToolContext, config: dict[str, Any]
 ) -> ToolRegistry:
-    """Construct the registry with the six built-in tools and apply config.
+    """Construct the registry with the built-in tools and apply config.
 
     Reads `config["tools"]["enabled"]` to decide which tools to enable:
       - "all" (default): every registered tool.

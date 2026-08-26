@@ -116,6 +116,7 @@ async def test_payload_contains_enabled_tool_descriptions():
         "Bash",
         "Glob",
         "Grep",
+        "Diff",
     ]
     assert all(description for description in tool_descriptions)
 
