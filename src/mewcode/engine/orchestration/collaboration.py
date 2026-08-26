@@ -27,6 +27,8 @@ class SharedTaskBoard:
     entries: list[BoardEntry] = field(default_factory=list)
     review: str = ""
     verification: str = ""
+    review_history: list[str] = field(default_factory=list)
+    outcome: str = "pending"
 
     def summary(self) -> str:
         return "\n".join(
@@ -41,6 +43,7 @@ def review_passed(report: str) -> bool:
 
 AgentWorker = Callable[[AgentAssignment, SharedTaskBoard], Awaitable[str]]
 Reviewer = Callable[[SharedTaskBoard], Awaitable[str]]
+Tester = Callable[[SharedTaskBoard], Awaitable[str]]
 
 
 class CollaborativeRunner:
@@ -71,4 +74,47 @@ class CollaborativeRunner:
 
         await asyncio.gather(*(run_one(item, entry) for item, entry in zip(assignments, board.entries)))
         board.review = await reviewer(board)
+        return board
+
+    async def run_review_loop(
+        self,
+        objective: str,
+        assignments: list[AgentAssignment],
+        worker: AgentWorker,
+        reviewer: Reviewer,
+        tester: Tester,
+        max_review_cycles: int = 2,
+    ) -> SharedTaskBoard:
+        """Schedule Coding -> Review -> (Fix -> Review)* -> Test.
+
+        The reviewer only decides whether the coding result is acceptable.
+        A failed review is scheduler input: it creates a new coding task, and
+        dependent testing remains locked until a review explicitly passes.
+        """
+        board = await self.run(objective, assignments, worker, reviewer)
+        for _ in range(max(0, max_review_cycles)):
+            board.review_history.append(board.review)
+            if review_passed(board.review):
+                board.verification = await tester(board)
+                board.outcome = "accepted" if review_passed(board.verification) else "test_failed"
+                return board
+
+            repair = AgentAssignment(
+                "implementer",
+                "Fix every blocking issue from this review:\n" + board.review,
+            )
+            entry = BoardEntry("implementer", "Fix reviewer findings", status="running")
+            board.entries.append(entry)
+            try:
+                entry.result = await worker(repair, board)
+                entry.status = "completed"
+            except Exception as exc:
+                entry.result = str(exc)
+                entry.status = "failed"
+                board.outcome = "repair_failed"
+                return board
+            board.review = await reviewer(board)
+
+        board.review_history.append(board.review)
+        board.outcome = "review_failed"
         return board

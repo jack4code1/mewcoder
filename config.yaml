@@ -37,7 +37,9 @@ session:
 agent:
   routing:
     auto_plan: true
+    llm_router: true
     complexity_threshold: 3
+    runtime_escalation: true
 
 memory:
   retrieval_limit: 8

@@ -32,11 +32,19 @@ from ..engine.orchestration import (
     CollaborativeRunner,
     PlanExecutor,
     PlanStep,
+    PlanTask,
+    TaskScheduler,
+    TaskFailureAction,
     TaskRunner,
     TaskSpec,
     WorktreeManager,
+    LLMRouter,
+    RouteDispatcher,
     classify_intent,
+    escalation_target,
     review_passed,
+    ExecutionSignals,
+    parse_task_plan,
 )
 from ..engine.mcp import McpServerConfig, McpServerManager
 from ..engine.tools import (
@@ -146,6 +154,7 @@ class MewCodeApp(App):
         self.llm_client = None
         self.mode = "Chat"  # Chat or Single
         self.is_processing = False
+        self._tools_enabled_for_request = True
         self._agent_cancel_event: asyncio.Event | None = None
 
         # Tool subsystem (chapter 02-tools): locked at startup
@@ -577,18 +586,16 @@ class MewCodeApp(App):
         finally:
             self.execution_gateway = original_gateway
 
-    async def _plan_steps(self, objective: str, previous: list[PlanStep]) -> list[PlanStep]:
+    async def _plan_tasks(self, objective: str, recovery_context: str = ""):
         response = await self.llm_client.chat([
-            Message(MessageRole.SYSTEM, "Break the objective into 2-5 executable coding steps. Return only a JSON array of strings. When prior steps failed, replace only the remaining work."),
-            Message(MessageRole.USER, f"Objective: {objective}\nPrior steps: {[(item.objective, item.status, item.error) for item in previous]}"),
+            Message(MessageRole.SYSTEM, "Create a coding task graph. Return only JSON: {\"tasks\":[{\"id\":\"t1\",\"description\":\"...\",\"role\":\"researcher|implementer|reviewer\",\"depends_on\":[],\"files\":[],\"allowed_tools\":[\"ReadFile\",\"Glob\",\"Grep\",\"WriteFile\",\"EditFile\",\"Bash\"]}]}. Use 2-6 tasks. Dependencies must reference prior task IDs. Choose the minimum tools required. On recovery, preserve completed work and replace only failed or blocked work."),
+            Message(MessageRole.USER, f"Objective: {objective}\nRecovery context: {recovery_context or 'none'}"),
         ])
-        raw = response.content.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        items = json.loads(raw)
-        if not isinstance(items, list) or not all(isinstance(item, str) and item.strip() for item in items):
-            raise ValueError("Planner did not return a JSON array of steps")
-        return [PlanStep(item.strip()) for item in items[:5]]
+        return parse_task_plan(
+            response.content,
+            objective,
+            {tool.name for tool in self.tool_registry.list_enabled()},
+        )
 
     async def _run_subagent(self, objective: str, role: str = "executor", board: str = "") -> str:
         manager = ConversationManager()
@@ -621,13 +628,34 @@ class MewCodeApp(App):
         try:
             if not self._ensure_llm_client():
                 return
-            plan = await PlanExecutor(max_replans=1).run(
-                objective,
-                self._plan_steps,
-                lambda step, steps: self._run_subagent(step.objective, "executor", "\n".join(item.objective for item in steps)),
-            )
-            lines = [f"{item.status}: {item.objective}" for item in plan.steps]
-            chat_area.add_system_message("Plan completed" + f" (replans: {plan.replans}):\n" + "\n".join(lines))
+            async def worker(task: PlanTask, task_plan) -> str:
+                enabled_before = [tool.name for tool in self.tool_registry.list_enabled()]
+                self.tool_registry.enable(task.allowed_tools)
+                try:
+                    return await self._run_subagent(
+                        task.description,
+                        task.role,
+                        task_plan.summary() + f"\nTask tools: {', '.join(task.allowed_tools) or 'none'}",
+                    )
+                finally:
+                    self.tool_registry.enable(enabled_before)
+
+            recovery_context = ""
+            for replan_attempt in range(2):
+                plan = await self._plan_tasks(objective, recovery_context)
+                plan = await TaskScheduler(
+                    max_concurrency=1,
+                    failure_policy=lambda _task, _plan: TaskFailureAction.REPLAN,
+                ).run(plan, worker)
+                if plan.outcome != "replan_required":
+                    break
+                recovery_context = (
+                    f"Replan {replan_attempt + 1}: task {plan.failed_task_id} failed. "
+                    f"Execution state:\n{plan.summary()}"
+                )
+                chat_area.add_system_message("A planned task failed; rebuilding the remaining plan.")
+            title = "Plan completed" if plan.outcome == "completed" else f"Plan {plan.outcome}"
+            chat_area.add_system_message(title + ":\n" + plan.summary())
         except Exception as exc:
             chat_area.add_system_message(f"Plan failed: {exc}")
         finally:
@@ -647,30 +675,24 @@ class MewCodeApp(App):
                 return await self._run_subagent(assignment.objective, assignment.role, board.summary())
             async def reviewer(board):
                 return await self._run_subagent(
-                    "Review the implementation against the objective. Inspect changed files and run relevant tests. "
-                    "List concrete issues. End the response with exactly `VERDICT: PASS` only when tests pass and no blocking issue remains; otherwise end with `VERDICT: FIX`.",
+                    "Review the implementation against the objective. Inspect changed files and list concrete blocking issues. "
+                    "Do not perform final test acceptance here. End with exactly `VERDICT: PASS` only when no blocking issue remains; otherwise end with `VERDICT: FIX`.",
                     "reviewer",
                     board.summary(),
                 )
-            board = await CollaborativeRunner(max_concurrency=1).run(objective, assignments, worker, reviewer)
-            if not review_passed(board.review):
-                repair = await self._run_subagent(
-                    "Fix every blocking issue reported by the reviewer, then run the relevant tests.",
-                    "repairer",
-                    board.summary() + "\n\nReviewer report:\n" + board.review,
-                )
-                board.entries.append(type(board.entries[0])("repairer", "Fix reviewer findings", repair, "completed"))
-                board.verification = await self._run_subagent(
-                    "Verify the final implementation independently. Inspect the changes and run relevant tests. "
-                    "End with exactly `VERDICT: PASS` only if the task is complete and tests pass; otherwise end with `VERDICT: FIX`.",
-                    "verifier",
+            async def tester(board):
+                return await self._run_subagent(
+                    "Run the relevant tests for the reviewed implementation and report final acceptance. "
+                    "End with exactly `VERDICT: PASS` only if tests pass; otherwise end with `VERDICT: FIX`.",
+                    "tester",
                     board.summary(),
                 )
-            else:
-                board.verification = board.review
-            status = "accepted" if review_passed(board.verification) else "not accepted"
+            board = await CollaborativeRunner(max_concurrency=1).run_review_loop(
+                objective, assignments, worker, reviewer, tester, max_review_cycles=2,
+            )
+            status = "accepted" if board.outcome == "accepted" else "not accepted"
             chat_area.add_system_message(
-                f"Team {status}.\n\nReview:\n{board.review}\n\nVerification:\n{board.verification}\n\nBoard:\n{board.summary()}"
+                f"Team {status} ({board.outcome}).\n\nReview:\n{board.review}\n\nTest:\n{board.verification}\n\nBoard:\n{board.summary()}"
             )
         except Exception as exc:
             chat_area.add_system_message(f"Team failed: {exc}")
@@ -709,11 +731,15 @@ class MewCodeApp(App):
         self.conversation_manager.add_message(user_message)
 
         routing = (self.config.get("agent") or {}).get("routing") or {}
+        if routing.get("llm_router", True):
+            self.run_worker(self._route_and_dispatch(content), exclusive=True)
+            return
+
         decision = classify_intent(content, int(routing.get("complexity_threshold", 3)))
+        if routing.get("auto_plan", True) and decision.mode == "delegate":
+            self.run_worker(self._run_team_task(content), exclusive=True)
+            return
         if routing.get("auto_plan", True) and decision.mode == "plan_execute":
-            chat_area.add_system_message(
-                "Complex coding request detected; switching to Plan-and-Execute."
-            )
             self.run_worker(self._run_planned_task(content), exclusive=True)
             return
 
@@ -789,6 +815,38 @@ class MewCodeApp(App):
         plan = plan_context(items, self.project_runtime.context_budget)
         return f"Context: {plan.used_tokens}/{plan.budget} tokens; included {len(plan.included)}, excluded {len(plan.excluded)}."
 
+    async def _route_and_dispatch(self, content: str) -> None:
+        """Ask the semantic router for a validated strategy, then dispatch it."""
+        self.is_processing = True
+        try:
+            if not self._ensure_llm_client():
+                return
+            routing = (self.config.get("agent") or {}).get("routing") or {}
+            decision = await LLMRouter().route(
+                self.llm_client, content, int(routing.get("complexity_threshold", 3))
+            )
+            chat_area = self.query_one("#chat-area", ChatArea)
+            chat_area.add_system_message(
+                f"Route: {decision.mode} ({decision.intent}; execution={decision.execution_chain_length}, decision={decision.decision_chain_length})"
+            )
+            dispatcher = RouteDispatcher(
+                direct=lambda task: self._run_routed_react(task, tools_enabled=False),
+                react=lambda task: self._run_routed_react(task, tools_enabled=True),
+                plan_execute=self._run_planned_task,
+                delegate=self._run_team_task,
+            )
+            await dispatcher.dispatch(decision, content)
+        finally:
+            if self.is_processing:
+                self.is_processing = False
+
+    async def _run_routed_react(self, content: str, *, tools_enabled: bool) -> None:
+        self._tools_enabled_for_request = tools_enabled
+        try:
+            await self._process_with_llm(content)
+        finally:
+            self._tools_enabled_for_request = True
+
     async def _process_with_llm(self, content: str) -> None:
         """Consume Agent Loop events and update the TUI."""
         logger.info("Starting LLM processing...")
@@ -809,12 +867,14 @@ class MewCodeApp(App):
 
             tool_widgets: dict[str, str] = {}
             is_streaming = False
+            signals = ExecutionSignals()
+            escalation: str | None = None
 
             async for event in run_agent_loop(
                 llm_client=self.llm_client,
                 conversation_manager=self.conversation_manager,
                 tool_registry=self.tool_registry,
-                tools_payload=self._build_tools_payload(),
+                tools_payload=self._build_tools_payload() if self._tools_enabled_for_request else [],
                 build_messages=self._messages_with_system,
                 cancel_event=self._agent_cancel_event,
                 execution_gateway=self.execution_gateway,
@@ -832,16 +892,28 @@ class MewCodeApp(App):
                         chat_area.add_assistant_message_end()
                         is_streaming = False
                     status_bar.update_agent_status("Thinking...")
+                    signals.turns += 1
 
                 elif event.event_type == AgentEventType.TOOL_USE:
+                    signals.tool_calls += 1
+                    if event.tool_name in {"ReadFile", "Glob", "Grep"}:
+                        signals.read_search_calls += 1
+                    elif event.tool_name in {"WriteFile", "EditFile"}:
+                        signals.write_calls += 1
                     status_bar.update_agent_status(f"Running {event.tool_name}...")
                     widget_id = chat_area.add_tool_call(
                         event.tool_name or "tool", event.summary
                     )
                     if event.tool_call_id:
                         tool_widgets[event.tool_call_id] = widget_id
+                    if ((self.config.get("agent") or {}).get("routing") or {}).get("runtime_escalation", True):
+                        escalation = escalation_target(signals)
+                        if escalation and self._agent_cancel_event is not None:
+                            self._agent_cancel_event.set()
 
                 elif event.event_type == AgentEventType.TOOL_RESULT:
+                    if event.is_error:
+                        signals.failures += 1
                     widget_id = tool_widgets.get(event.tool_call_id or "")
                     if widget_id:
                         chat_area.update_tool_call_result(
@@ -887,12 +959,25 @@ class MewCodeApp(App):
                     if is_streaming:
                         chat_area.add_assistant_message_end()
                         is_streaming = False
-                    if event.stop_reason == AgentStopReason.CANCELLED:
+                    if event.stop_reason == AgentStopReason.CANCELLED and escalation is None:
                         chat_area.add_system_message("Agent cancelled.")
                     status_bar.update_agent_status("Idle")
 
             logger.info("Processing completed (Agent Loop).")
-            await self._extract_memories(content)
+            if escalation:
+                progress = (
+                    f"Original objective: {content}\n"
+                    f"Observed work before escalation: {signals.tool_calls} tool calls, "
+                    f"{signals.read_search_calls} read/search calls, {signals.write_calls} edits, "
+                    f"{signals.turns} turns. Inspect existing workspace changes before continuing."
+                )
+                chat_area.add_system_message(f"Runtime complexity increased; escalating to {escalation}.")
+                if escalation == "delegate":
+                    await self._run_team_task(progress)
+                else:
+                    await self._run_planned_task(progress)
+            else:
+                await self._extract_memories(content)
 
         except Exception as e:
             logger.error("Error in LLM processing: %s", e, exc_info=True)
