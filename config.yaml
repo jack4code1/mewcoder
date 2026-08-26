@@ -3,11 +3,17 @@
 # LLM 配置
 llm:
   # 默认模型
-  default_model: "mimo-v2.5-pro"
-  default_provider: "custom"
+  default_model: "glm-5.2"
+  default_provider: "openai"
 
   # 模型配置
   models:
+    glm-5.2:
+      provider: "openai"
+      base_url: "https://open.bigmodel.cn/api/paas/v4"
+      api_key_env: "ZAI_API_KEY"
+      model: "glm-5.2"
+
     mimo-v2.5-pro:
       provider: "custom"
       base_url: "https://token-plan-cn.xiaomimimo.com/v1"
@@ -26,6 +32,22 @@ llm:
 session:
   storage_dir: "~/.mewcode/sessions"
   auto_save: true
+
+# Automatically use planning only for clearly multi-step coding tasks.
+agent:
+  routing:
+    auto_plan: true
+    complexity_threshold: 3
+
+memory:
+  retrieval_limit: 8
+  auto_extract: true
+  embedding:
+    enabled: true
+    base_url: "https://open.bigmodel.cn/api/paas/v4"
+    model: "embedding-3"
+    dimensions: 512
+    api_key_env: "ZAI_API_KEY"
 
 # TUI 配置
 tui:

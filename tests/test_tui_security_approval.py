@@ -2,8 +2,10 @@ import pytest
 from textual.widgets import Static
 
 from mewcode.engine.security.models import ExecutionRequest, OperationKind
+from mewcode.engine.security.approval import ApprovalStatus
 from mewcode.engine.tools import WriteFileTool
 from mewcode.tui.app import MewCodeApp
+from mewcode.tui.widgets.approval_dialog import ApprovalDialog
 from mewcode.tui.widgets.chat_area import ChatArea
 
 
@@ -24,8 +26,38 @@ async def test_approval_card_shows_safe_operation_details_and_choices():
 
     assert "Operation: write" in text
     assert "Risk: moderate" in text
-    assert "/approve-request request-1" in text
-    assert "/deny-request request-1" in text
+    assert "Choose an action in the approval dialog." in text
+
+
+@pytest.mark.asyncio
+async def test_approval_dialog_approves_once_with_arrow_and_enter():
+    app = MewCodeApp()
+    assert app.execution_gateway is not None
+    result = await app.execution_gateway.execute(
+        ExecutionRequest(
+            "WriteFile",
+            {"path": "private.txt", "content": "value"},
+            operation=OperationKind.WRITE,
+        )
+    )
+    request_id = result.metadata["request_id"]
+
+    async with app.run_test() as pilot:
+        app._show_approval_dialog(
+            request_id,
+            "WriteFile",
+            "private.txt",
+            result.metadata["approval"],
+        )
+        await pilot.pause()
+        assert isinstance(app.screen, ApprovalDialog)
+
+        await pilot.press("right", "enter")
+        await pilot.pause()
+
+    approval = app.execution_gateway.approvals.pending[request_id]
+    assert approval.status is ApprovalStatus.APPROVED
+    assert "WriteFile" in app.execution_gateway.grants.one_time_tools
 
 
 @pytest.mark.asyncio

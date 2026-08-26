@@ -40,6 +40,15 @@ def test_memory_search_ranks_matching_records(tmp_path):
     assert [record.content for record in store.search("python pytest")] == ["Use pytest for Python tests"]
 
 
+def test_pending_memory_requires_approval_before_retrieval(tmp_path):
+    store = ProjectMemoryStore(tmp_path)
+    candidate = store.save(MemoryRecord("Use ruff before commit", status="pending", source="auto"))
+
+    assert store.relevant("ruff").__eq__([])
+    assert store.approve(candidate.id) is not None
+    assert store.relevant("ruff")[0].id == candidate.id
+
+
 async def test_summarize_command_replaces_older_history():
     app = MewCodeApp()
     async with app.run_test() as pilot:

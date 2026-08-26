@@ -71,7 +71,7 @@ async def test_read_file_success_flow():
     assert len(tool_messages) == 1
     assert tool_messages[0].tool_result_is_error is False
     assert "default_model" in tool_messages[0].content
-    assert "mimo-v2.5-pro" in tool_messages[0].content
+    assert "glm-5.2" in tool_messages[0].content
     assert assistant_messages[-1].content == "final mentions mimo-v2.5-pro"
 
 

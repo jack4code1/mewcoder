@@ -1,6 +1,7 @@
 """MewCode TUI Application"""
 
 import asyncio
+import json
 import os
 from datetime import datetime
 from pathlib import Path
@@ -20,13 +21,23 @@ from ..engine.security.gateway import ExecutionGateway
 from ..engine.security.audit import AuditLog
 from ..engine.security.revisions import RevisionStore
 from ..engine.runtime import ProjectRuntime
-from ..engine.context import ContextItem, ProjectMemoryStore, plan_context
+from ..engine.context import ContextItem, ProjectMemoryStore, embed_with_provider, plan_context
 from ..engine.context import MemoryRecord
 from ..engine.context import compress_messages
 from ..engine.extensions import ProjectHookStore, ProjectSkillStore, SkillRunner
 from ..engine.extensions import CommandCatalog
 from ..engine.models import Message, MessageRole, TokenUsage
-from ..engine.orchestration import TaskRunner, TaskSpec, WorktreeManager
+from ..engine.orchestration import (
+    AgentAssignment,
+    CollaborativeRunner,
+    PlanExecutor,
+    PlanStep,
+    TaskRunner,
+    TaskSpec,
+    WorktreeManager,
+    classify_intent,
+    review_passed,
+)
 from ..engine.mcp import McpServerConfig, McpServerManager
 from ..engine.tools import (
     ToolContext,
@@ -37,6 +48,7 @@ from ..logger import logger
 from .widgets.chat_area import ChatArea
 from .widgets.input_box import InputBox, InputContentChanged, InputSubmitted, TabPressed
 from .widgets.status_bar import StatusBar
+from .widgets.approval_dialog import ApprovalDialog
 
 
 class MewCodeApp(App):
@@ -142,6 +154,7 @@ class MewCodeApp(App):
         )
         self.project_runtime = ProjectRuntime(self.tool_context.working_dir)
         self.memory_store = ProjectMemoryStore(self.tool_context.working_dir)
+        self._memory_query_vector: list[float] | None = None
         self.skill_store = ProjectSkillStore(self.tool_context.working_dir)
         self.skill_runner = SkillRunner()
         self.tool_registry = build_default_registry(self.tool_context, self.config)
@@ -362,6 +375,20 @@ class MewCodeApp(App):
                 "Memory search:\n" + "\n".join(f"- {item.id} [{item.kind}]: {item.content}" for item in records)
                 if records else "No matching project memory."
             )
+        elif command == "/memory review":
+            records = self.memory_store.list("pending")
+            chat_area.add_system_message(
+                "Memory candidates:\n" + "\n".join(
+                    f"- {item.id} [{item.kind}, confidence {item.confidence:.2f}]: {item.content}"
+                    for item in records
+                ) if records else "No pending memory candidates."
+            )
+        elif command.startswith("/memory approve "):
+            record = self.memory_store.approve(command.removeprefix("/memory approve ").strip())
+            chat_area.add_system_message(f"Approved memory: {record.id}" if record else "No pending memory candidate found.")
+        elif command.startswith("/memory reject "):
+            record_id = command.removeprefix("/memory reject ").strip()
+            chat_area.add_system_message("Rejected memory candidate." if self.memory_store.reject(record_id) else "No pending memory candidate found.")
         elif command == "/summarize":
             messages = self.conversation_manager.get_messages()
             summary = compress_messages(messages)
@@ -381,6 +408,24 @@ class MewCodeApp(App):
             else:
                 self.run_worker(self._run_isolated_task(objective))
                 chat_area.add_system_message(f"Starting isolated task: {objective}")
+        elif command.startswith("/plan "):
+            objective = command.removeprefix("/plan ").strip()
+            if not objective:
+                chat_area.add_system_message("Usage: /plan <objective>")
+            elif self.is_processing:
+                chat_area.add_system_message("Wait for the active request before starting a plan.")
+            else:
+                self.run_worker(self._run_planned_task(objective))
+                chat_area.add_system_message(f"Planning task: {objective}")
+        elif command.startswith("/team "):
+            objective = command.removeprefix("/team ").strip()
+            if not objective:
+                chat_area.add_system_message("Usage: /team <objective>")
+            elif self.is_processing:
+                chat_area.add_system_message("Wait for the active request before starting a team.")
+            else:
+                self.run_worker(self._run_team_task(objective))
+                chat_area.add_system_message(f"Starting agent team: {objective}")
         elif command == "/tasks":
             if not self.task_runs:
                 chat_area.add_system_message("No isolated tasks have run.")
@@ -451,6 +496,32 @@ class MewCodeApp(App):
         chat_area = self.query_one("#chat-area", ChatArea)
         chat_area.add_system_message(result.content)
 
+    def _show_approval_dialog(
+        self,
+        request_id: str,
+        tool_name: str,
+        summary: str,
+        approval: dict | None = None,
+    ) -> None:
+        """Open the keyboard-first approval UI for a pending request."""
+        self.push_screen(
+            ApprovalDialog(tool_name, summary, approval),
+            lambda choice: self._resolve_approval_choice(request_id, choice),
+        )
+
+    def _resolve_approval_choice(self, request_id: str, choice: str | None) -> None:
+        if self.execution_gateway is None:
+            return
+        chat_area = self.query_one("#chat-area", ChatArea)
+        if choice == "deny" or choice is None:
+            chat_area.add_system_message(self.execution_gateway.deny(request_id).content)
+        else:
+            self.run_worker(self._approve_request(request_id, project=choice == "project"))
+        self.call_after_refresh(self._focus_input)
+
+    def _focus_input(self) -> None:
+        self.query_one("#input-box", InputBox).query_one("#input-field").focus()
+
     async def _connect_mcp(self, name: str) -> None:
         chat_area = self.query_one("#chat-area", ChatArea)
         try:
@@ -490,6 +561,13 @@ class MewCodeApp(App):
                     chat_area.add_approval_request(
                         event.request_id or "unknown", event.tool_name or "tool", event.summary, event.approval
                     )
+                    if event.request_id:
+                        self._show_approval_dialog(
+                            event.request_id,
+                            event.tool_name or "tool",
+                            event.summary,
+                            event.approval,
+                        )
             return text
 
         try:
@@ -498,6 +576,106 @@ class MewCodeApp(App):
             chat_area.add_system_message(f"Isolated task {run.id[:8]} {run.status}: {run.result}\nDiff:\n{run.diff or '(no changes)'}")
         finally:
             self.execution_gateway = original_gateway
+
+    async def _plan_steps(self, objective: str, previous: list[PlanStep]) -> list[PlanStep]:
+        response = await self.llm_client.chat([
+            Message(MessageRole.SYSTEM, "Break the objective into 2-5 executable coding steps. Return only a JSON array of strings. When prior steps failed, replace only the remaining work."),
+            Message(MessageRole.USER, f"Objective: {objective}\nPrior steps: {[(item.objective, item.status, item.error) for item in previous]}"),
+        ])
+        raw = response.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        items = json.loads(raw)
+        if not isinstance(items, list) or not all(isinstance(item, str) and item.strip() for item in items):
+            raise ValueError("Planner did not return a JSON array of steps")
+        return [PlanStep(item.strip()) for item in items[:5]]
+
+    async def _run_subagent(self, objective: str, role: str = "executor", board: str = "") -> str:
+        manager = ConversationManager()
+        manager.create_conversation()
+        manager.add_message(Message(MessageRole.USER, objective))
+        text = ""
+        async for event in run_agent_loop(
+            llm_client=self.llm_client,
+            conversation_manager=manager,
+            tool_registry=self.tool_registry,
+            tools_payload=self._build_tools_payload(),
+            build_messages=lambda: [
+                Message(MessageRole.SYSTEM, build_system_prompt(self.tool_context, self.tool_registry)),
+                Message(MessageRole.SYSTEM, f"You are the {role} agent. Shared board:\n{board}"),
+            ] + manager.get_messages(),
+            execution_gateway=self.execution_gateway,
+            context_budget=self.project_runtime.context_budget,
+        ):
+            if event.event_type == AgentEventType.STREAM_TEXT:
+                text += event.text
+            elif event.event_type == AgentEventType.APPROVAL_REQUIRED and event.request_id:
+                self._show_approval_dialog(event.request_id, event.tool_name or "tool", event.summary, event.approval)
+        if not text:
+            text = manager.get_messages()[-1].content if manager.get_messages() else "No result"
+        return text
+
+    async def _run_planned_task(self, objective: str) -> None:
+        chat_area = self.query_one("#chat-area", ChatArea)
+        self.is_processing = True
+        try:
+            if not self._ensure_llm_client():
+                return
+            plan = await PlanExecutor(max_replans=1).run(
+                objective,
+                self._plan_steps,
+                lambda step, steps: self._run_subagent(step.objective, "executor", "\n".join(item.objective for item in steps)),
+            )
+            lines = [f"{item.status}: {item.objective}" for item in plan.steps]
+            chat_area.add_system_message("Plan completed" + f" (replans: {plan.replans}):\n" + "\n".join(lines))
+        except Exception as exc:
+            chat_area.add_system_message(f"Plan failed: {exc}")
+        finally:
+            self.is_processing = False
+
+    async def _run_team_task(self, objective: str) -> None:
+        chat_area = self.query_one("#chat-area", ChatArea)
+        self.is_processing = True
+        try:
+            if not self._ensure_llm_client():
+                return
+            assignments = [
+                AgentAssignment("researcher", f"Inspect the project and identify relevant files for: {objective}"),
+                AgentAssignment("implementer", f"Implement the requested change: {objective}"),
+            ]
+            async def worker(assignment, board):
+                return await self._run_subagent(assignment.objective, assignment.role, board.summary())
+            async def reviewer(board):
+                return await self._run_subagent(
+                    "Review the implementation against the objective. Inspect changed files and run relevant tests. "
+                    "List concrete issues. End the response with exactly `VERDICT: PASS` only when tests pass and no blocking issue remains; otherwise end with `VERDICT: FIX`.",
+                    "reviewer",
+                    board.summary(),
+                )
+            board = await CollaborativeRunner(max_concurrency=1).run(objective, assignments, worker, reviewer)
+            if not review_passed(board.review):
+                repair = await self._run_subagent(
+                    "Fix every blocking issue reported by the reviewer, then run the relevant tests.",
+                    "repairer",
+                    board.summary() + "\n\nReviewer report:\n" + board.review,
+                )
+                board.entries.append(type(board.entries[0])("repairer", "Fix reviewer findings", repair, "completed"))
+                board.verification = await self._run_subagent(
+                    "Verify the final implementation independently. Inspect the changes and run relevant tests. "
+                    "End with exactly `VERDICT: PASS` only if the task is complete and tests pass; otherwise end with `VERDICT: FIX`.",
+                    "verifier",
+                    board.summary(),
+                )
+            else:
+                board.verification = board.review
+            status = "accepted" if review_passed(board.verification) else "not accepted"
+            chat_area.add_system_message(
+                f"Team {status}.\n\nReview:\n{board.review}\n\nVerification:\n{board.verification}\n\nBoard:\n{board.summary()}"
+            )
+        except Exception as exc:
+            chat_area.add_system_message(f"Team failed: {exc}")
+        finally:
+            self.is_processing = False
 
     def _copy_last_reply(self) -> None:
         """复制最后一条 AI 回复到剪贴板"""
@@ -529,6 +707,15 @@ class MewCodeApp(App):
         # Add to conversation manager
         user_message = Message(role=MessageRole.USER, content=content)
         self.conversation_manager.add_message(user_message)
+
+        routing = (self.config.get("agent") or {}).get("routing") or {}
+        decision = classify_intent(content, int(routing.get("complexity_threshold", 3)))
+        if routing.get("auto_plan", True) and decision.mode == "plan_execute":
+            chat_area.add_system_message(
+                "Complex coding request detected; switching to Plan-and-Execute."
+            )
+            self.run_worker(self._run_planned_task(content), exclusive=True)
+            return
 
         # Update restored nonzero token usage without inventing a zero value.
         token_usage = self.conversation_manager.get_token_usage()
@@ -580,9 +767,15 @@ class MewCodeApp(App):
         into the conversation history."""
         sys_text = build_system_prompt(self.tool_context, self.tool_registry)
         sys_msg = Message(role=MessageRole.SYSTEM, content=sys_text)
+        user_messages = [message.content for message in self.conversation_manager.get_messages() if message.role is MessageRole.USER]
+        retrieved = (
+            self.memory_store.relevant_vector(self._memory_query_vector, user_messages[-1], limit=8)
+            if self._memory_query_vector is not None and user_messages
+            else self.memory_store.relevant(user_messages[-1] if user_messages else "", limit=8)
+        )
         memories = [
             Message(MessageRole.SYSTEM, f"Project memory ({record.kind}): {record.content}")
-            for record in self.memory_store.list()
+            for record in retrieved
         ]
         skills = [
             Message(MessageRole.SYSTEM, f"Project skill ({item.source}): {item.content}")
@@ -609,6 +802,10 @@ class MewCodeApp(App):
 
             if not self._ensure_llm_client():
                 return
+
+            embedding_config = ((self.config.get("memory") or {}).get("embedding") or {})
+            vectors = await embed_with_provider([content], embedding_config)
+            self._memory_query_vector = vectors[0] if vectors else None
 
             tool_widgets: dict[str, str] = {}
             is_streaming = False
@@ -661,6 +858,13 @@ class MewCodeApp(App):
                         event.summary,
                         event.approval,
                     )
+                    if event.request_id:
+                        self._show_approval_dialog(
+                            event.request_id,
+                            event.tool_name or "tool",
+                            event.summary,
+                            event.approval,
+                        )
                     status_bar.update_agent_status("Approval required")
 
                 elif event.event_type == AgentEventType.USAGE and event.usage is not None:
@@ -688,6 +892,7 @@ class MewCodeApp(App):
                     status_bar.update_agent_status("Idle")
 
             logger.info("Processing completed (Agent Loop).")
+            await self._extract_memories(content)
 
         except Exception as e:
             logger.error("Error in LLM processing: %s", e, exc_info=True)
@@ -697,7 +902,45 @@ class MewCodeApp(App):
         finally:
             self.is_processing = False
             self._agent_cancel_event = None
+            self._memory_query_vector = None
             logger.info("is_processing set to False")
+
+    async def _extract_memories(self, task: str) -> None:
+        """Persist stable project facts extracted from a completed interaction."""
+        memory_config = self.config.get("memory") or {}
+        if not memory_config.get("auto_extract", True) or self.llm_client is None or not hasattr(self.llm_client, "chat"):
+            return
+        try:
+            transcript = "\n".join(
+                f"{message.role.value}: {message.content[:1200]}"
+                for message in self.conversation_manager.get_messages()[-12:]
+            )
+            response = await self.llm_client.chat([
+                Message(MessageRole.SYSTEM, "Extract only durable project facts, conventions, or decisions. Return JSON array objects with content, kind, and confidence (0-1). Return [] for no durable facts. Do not include secrets."),
+                Message(MessageRole.USER, f"Task: {task}\n\nOutcome and tool evidence:\n{transcript}"),
+            ])
+            raw = response.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            facts = json.loads(raw)
+            if not isinstance(facts, list):
+                return
+            existing = {item.content for item in self.memory_store.list()}
+            candidates = []
+            for fact in facts[:5]:
+                if not isinstance(fact, dict):
+                    continue
+                value = fact.get("content")
+                confidence = fact.get("confidence", 0)
+                if isinstance(value, str) and 4 <= len(value.strip()) <= 300 and value not in existing and isinstance(confidence, (int, float)) and confidence >= 0.5:
+                    candidates.append(MemoryRecord(value.strip(), kind=str(fact.get("kind", "fact"))[:40], source="auto", confidence=float(confidence), status="pending"))
+            vectors = await embed_with_provider([item.content for item in candidates], memory_config.get("embedding") or {})
+            for index, record in enumerate(candidates):
+                if vectors is not None:
+                    record.vector = vectors[index]
+                self.memory_store.save(record)
+        except Exception as exc:  # memory extraction must never fail the task
+            logger.debug("Automatic memory extraction skipped: %s", exc)
 
     def action_cancel_agent(self) -> None:
         """Cancel the active agent loop without quitting the app."""

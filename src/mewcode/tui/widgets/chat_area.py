@@ -75,13 +75,7 @@ class ChatArea(Widget):
         text.append(f"Target: {approval.get('resource_summary') or summary}\n")
         text.append(f"Operation: {approval.get('operation', 'unknown')}\n")
         text.append(f"Risk: {approval.get('risk', 'unknown')}\n", style="yellow")
-        text.append(f"Request: {request_id}\n", style="dim")
-        text.append(
-            f"/approve-request {request_id}  |  "
-            f"/approve-project-request {request_id}  |  "
-            f"/deny-request {request_id}",
-            style="cyan",
-        )
+        text.append("Choose an action in the approval dialog.", style="cyan")
         self._get_scroll_container().mount(Static(text, classes="chat-msg system-msg"))
         self._scroll_to_bottom()
 
