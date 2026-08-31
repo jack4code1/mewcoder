@@ -1,87 +1,80 @@
 # MewCode
 
-MewCode is a terminal AI coding assistant built with Python and Textual. It
-supports OpenAI-compatible endpoints, Claude, Ollama, MCP tools, project
-memory, execution planning, and approval-gated file and shell operations.
+MewCode 是一个基于 Python 和 Textual 的终端 AI 编程助手。它把模型对话、项目上下文、工具调用和安全审批整合到一个终端界面中，适合在真实代码库中进行查询、修改、测试和多步骤任务协作。
 
-## Requirements
+## 项目亮点
 
-- Python 3.10 or newer
-- An API key for the model provider you choose, unless using a local Ollama
-  model
+- 多模型接入：支持 OpenAI 兼容接口、Claude、Ollama 以及自定义 Provider。
+- 终端交互界面：基于 Textual 构建，支持会话恢复、模型切换、Token 用量和运行时长展示。
+- 工具系统：提供文件读取、文件编辑、差异查看、目录匹配、内容搜索和 Bash 工具。
+- 安全控制：写文件和执行命令等状态变更操作默认需要用户审批，并记录审批和审计信息。
+- 多智能体编排：支持角色、任务依赖、工具权限、取消控制、预算限制和结构化执行结果。
+- 项目记忆：保存会话和项目级上下文，支持检索、自动提取以及可选的向量嵌入。
+- MCP 扩展：支持通过 MCP stdio 服务扩展外部工具，服务需要在配置中显式启用。
 
-## Install
+## 技术栈
+
+- Python 3.10+
+- Textual、Rich
+- HTTPX、PyYAML
+- pytest、pytest-asyncio
+
+## 安装
 
 ```bash
 python -m pip install .
 ```
 
-For development dependencies:
+开发环境（包含测试依赖）：
 
 ```bash
 python -m pip install -e ".[dev]"
 ```
 
-## Configure and run
+## 配置和运行
 
-1. Copy or edit `config.yaml` to select a model and provider. Put local API
-   keys or overrides in the ignored `config.local.yaml` file.
-2. Set the API key environment variable configured for the selected model.
-3. Start the terminal application:
+1. 根据需要修改 `config.yaml` 中的模型和 Provider。
+2. 将对应的 API Key 放入环境变量，例如 `ZAI_API_KEY` 或 `MIMO_API_KEY`。
+3. 启动终端应用：
 
 ```bash
 mewcode
 ```
 
-You can also select a configured model or provider at launch:
+也可以在启动时指定模型和 Provider：
 
 ```bash
 mewcode --model glm-5.2 --provider openai
 ```
 
-## Safety
+本地配置可以放在被 Git 忽略的 `config.local.yaml` 中，避免把密钥提交到仓库。使用 Ollama 时，需要先在本机启动 Ollama 服务并准备对应模型。
 
-State-changing tools, including shell commands and file edits, require user
-approval when `security.enabled` is enabled. Project-level approvals are
-stored in `.mewcode/permissions.json`, which is ignored by Git.
+## 安全模型
 
-## Development
+项目默认开启安全审批。文件写入、文件编辑和 Shell 命令等可能改变工作区状态的操作，需要在终端中明确批准；只读工具可以按配置单独开放。审批记录和项目权限保存在 `.mewcode/` 下，该目录不会提交到 Git。
 
-Run the test suite with:
+## 核心结构
+
+```text
+src/mewcode/
+├── cli.py                         命令行参数和入口
+├── tui/                           Textual 终端界面
+├── engine/agent.py                Agent 循环和模型调用
+├── engine/adapters/               不同模型 Provider 的适配器
+├── engine/tools/                  文件、搜索、差异和 Shell 工具
+├── engine/security/               审批、权限和审计
+├── engine/context/                上下文压缩、预算和项目记忆
+└── engine/orchestration/          多智能体任务编排和隔离工作树
+```
+
+## 测试
+
+运行完整测试套件：
 
 ```bash
 python -m pytest -q
 ```
 
-The project source files are UTF-8 and include Chinese routing keywords so
-Chinese coding requests are classified without relying on an LLM router.
+## 许可证
 
-## Multi-agent execution
-
-MewCode uses a single-process, role-based multi-agent runtime. It reuses the
-configured LLM client rather than starting one model process per role.
-
-- `AgentRuntime` gives each role a private conversation, tool allow-list,
-  step/token/time budgets, cancellation handling, and structured result.
-- `AgentTask` and `TaskGraph` validate roles, dependencies, state
-  transitions, and the intersection of registered tools, role policy, and
-  task-requested tools.
-- `InMemoryMessageBus` provides validated, deduplicated task messages and
-  per-agent inboxes. It is an in-process interface designed to be replaceable
-  by external transport later.
-- `SharedTaskBoard` stores task summaries, artifact references, review/test
-  decisions, and an execution trace. `view_for()` exposes only a task's own
-  inputs, dependency summaries, and addressed messages.
-- `StructuredTaskScheduler` may run non-conflicting read-only tasks together;
-  write-capable tasks remain serial in the shared workspace. Existing Git
-  worktree execution is retained for isolated tasks.
-- `WorktreeTaskScheduler` is available for structured write tasks: it creates
-  one clean Git worktree per non-conflicting task, stores the resulting diff as
-  a board artifact, and requires explicit per-task application to the clean
-  main worktree. It refuses unsafe application when the main worktree is
-  dirty.
-
-The interactive team command remains deliberately serial and follows
-research → implementation → review → repair (bounded) → test. Review verdicts
-accept structured `{ "verdict": "PASS|FIX" }` payloads while remaining
-compatible with the legacy `VERDICT: PASS/FIX` convention.
+本项目采用 MIT License。
