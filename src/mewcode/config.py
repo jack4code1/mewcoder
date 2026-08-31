@@ -64,6 +64,7 @@ _DEFAULT_TOOLS_CONFIG = {
 _DEFAULT_SECURITY_CONFIG = {
     "enabled": False,
     "approval_timeout_seconds": 300,
+    "audit_max_file_bytes": 5 * 1024 * 1024,
 }
 
 
@@ -76,6 +77,13 @@ def get_security_config(config: dict) -> dict[str, Any]:
     timeout = merged["approval_timeout_seconds"]
     if not isinstance(timeout, (int, float)) or timeout <= 0:
         raise ValueError("security.approval_timeout_seconds must be positive")
+    max_file_bytes = merged["audit_max_file_bytes"]
+    if max_file_bytes is not None and (
+        isinstance(max_file_bytes, bool)
+        or not isinstance(max_file_bytes, int)
+        or max_file_bytes <= 0
+    ):
+        raise ValueError("security.audit_max_file_bytes must be a positive integer or None")
     return merged
 
 

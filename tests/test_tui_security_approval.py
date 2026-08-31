@@ -78,4 +78,6 @@ async def test_audit_command_only_shows_safe_summary():
 
     assert "Recent security audit" in content
     assert "WriteFile" in content
+    assert "executed" in content or "approval_required" in content
+    assert "timestamp" not in content
     assert "secret" not in content

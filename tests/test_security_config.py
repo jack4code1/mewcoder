@@ -9,13 +9,22 @@ def test_security_config_has_safe_defaults_without_mutating_input():
 
     resolved = get_security_config(config)
 
-    assert resolved == {"enabled": True, "approval_timeout_seconds": 300}
+    assert resolved == {
+        "enabled": True,
+        "approval_timeout_seconds": 300,
+        "audit_max_file_bytes": 5 * 1024 * 1024,
+    }
     assert config == {"security": {"enabled": True}}
 
 
 def test_security_config_rejects_non_positive_approval_timeout():
     with pytest.raises(ValueError, match="approval_timeout_seconds"):
         get_security_config({"security": {"approval_timeout_seconds": 0}})
+
+
+def test_security_config_rejects_non_positive_audit_limit():
+    with pytest.raises(ValueError, match="audit_max_file_bytes"):
+        get_security_config({"security": {"audit_max_file_bytes": 0}})
 
 
 def test_default_application_configuration_creates_execution_gateway():

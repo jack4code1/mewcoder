@@ -4,6 +4,7 @@ from .models import ApprovalScope, ExecutionRequest, OperationKind, PermissionDe
 from .approval import ApprovalManager, ApprovalRequest, ApprovalStatus
 from .workspace import WorkspaceViolation, resolve_in_workspace, summarize_resource
 from .policy import PermissionStore, decide
+from .audit import AuditEvent, AuditLog, redact_sensitive
 
 __all__ = [
     "ExecutionRequest",
@@ -20,4 +21,7 @@ __all__ = [
     "ApprovalManager",
     "ApprovalRequest",
     "ApprovalStatus",
+    "AuditEvent",
+    "AuditLog",
+    "redact_sensitive",
 ]

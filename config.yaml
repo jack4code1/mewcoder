@@ -64,6 +64,8 @@ tui:
 security:
   enabled: true
   approval_timeout_seconds: 300
+  # Rotate audit.jsonl after 5 MiB; set to null to disable rotation.
+  audit_max_file_bytes: 5242880
 
 tools:
   enabled: "all"           # "all" | "readonly" | [ReadFile, Glob, Grep, ...]

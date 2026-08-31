@@ -11,7 +11,7 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.widgets import Footer, Header
 
-from ..config import get_mcp_servers, get_model_config, get_tools_config, load_config
+from ..config import get_mcp_servers, get_model_config, get_security_config, get_tools_config, load_config
 from ..engine.adapters import AdapterFactory
 from ..engine.adapters.claude_adapter import ClaudeAdapter
 from ..engine.conversation import ConversationManager
@@ -178,9 +178,15 @@ class MewCodeApp(App):
         ])
         self.execution_gateway = None
         self.hook_runner = None
-        if self.config.get("security", {}).get("enabled", False):
+        security_config = get_security_config(self.config)
+        self._audit_max_file_bytes = security_config["audit_max_file_bytes"]
+        if security_config["enabled"]:
             self.execution_gateway = ExecutionGateway(
-                self.tool_registry, audit_log=AuditLog(self.tool_context.working_dir),
+                self.tool_registry,
+                audit_log=AuditLog(
+                    self.tool_context.working_dir,
+                    max_file_bytes=self._audit_max_file_bytes,
+                ),
                 revisions=RevisionStore(self.tool_context.working_dir),
             )
             self.execution_gateway.grants.load_project(self.tool_context.working_dir)
@@ -381,9 +387,11 @@ class MewCodeApp(App):
             elif not self.execution_gateway.audit:
                 chat_area.add_system_message("No security audit entries for this session.")
             else:
-                entries = self.execution_gateway.audit[-10:]
+                entries = self.execution_gateway.recent_audit(10)
                 lines = [
-                    f"{entry.get('decision', 'unknown')}: {entry.get('tool', 'tool')}"
+                    f"{entry.get('timestamp', 'unknown time')} "
+                    f"{entry.get('event_type') or entry.get('decision', 'unknown')}: "
+                    f"{entry.get('tool_name') or entry.get('tool', 'tool')}"
                     f" ({entry.get('status') or entry.get('reason') or 'recorded'})"
                     for entry in entries
                 ]
@@ -634,7 +642,7 @@ class MewCodeApp(App):
             gateway = ExecutionGateway(
                 registry,
                 grants=self.project_runtime.permissions,
-                audit_log=AuditLog(lease.path),
+                audit_log=AuditLog(lease.path, max_file_bytes=self._audit_max_file_bytes),
                 revisions=RevisionStore(lease.path),
             )
             self.execution_gateway = gateway

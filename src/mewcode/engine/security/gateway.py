@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import threading
+from typing import Any
 
 from ..tools.base import ToolResult
 from ..tools.registry import ToolRegistry
 from .approval import ApprovalManager, ApprovalStatus
+from .audit import AuditLog, prepare_audit_entry
 from .models import ApprovalScope, ExecutionRequest, PermissionDecision
 from .policy import PermissionStore, decide
-from .audit import AuditLog
 from .revisions import RevisionStore
 
 
@@ -17,34 +19,86 @@ from .revisions import RevisionStore
 class ExecutionGateway:
     registry: ToolRegistry
     grants: PermissionStore = field(default_factory=PermissionStore)
-    audit: list[dict] = field(default_factory=list)
+    audit: list[dict[str, Any]] = field(default_factory=list)
     audit_log: AuditLog | None = None
     approvals: ApprovalManager = field(default_factory=ApprovalManager)
     revisions: RevisionStore | None = None
+    _audit_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     @property
     def pending(self) -> dict[str, ExecutionRequest]:
         """Compatibility view of requests awaiting a user decision."""
         return {key: value.execution for key, value in self.approvals.pending.items()}
 
-    def _record(self, entry: dict) -> dict:
-        self.audit.append(entry)
-        if self.audit_log is not None:
-            self.audit_log.append(entry)
+    def _record(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """Normalize once so memory and disk receive the same timestamped event."""
+        with self._audit_lock:
+            normalized = (
+                self.audit_log.prepare(entry)
+                if self.audit_log is not None
+                else prepare_audit_entry(entry)
+            )
+            self.audit.append(normalized)
+            if self.audit_log is not None:
+                self.audit_log.append(normalized)
+            return normalized
+
+    def recent_audit(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Return a bounded snapshot for UI display without exposing raw inputs."""
+        if limit <= 0:
+            return []
+        with self._audit_lock:
+            return list(self.audit[-limit:])
+
+    @staticmethod
+    def _request_entry(
+        request: ExecutionRequest,
+        *,
+        event_type: str,
+        permission: str,
+        decision: str,
+    ) -> dict[str, Any]:
+        entry: dict[str, Any] = {
+            "event_type": event_type,
+            "tool_name": request.tool_name,
+            # Compatibility key retained for existing consumers.
+            "tool": request.tool_name,
+            "source": request.source,
+            "operation": request.operation.value,
+            "risk": request.risk.value,
+            "permission": permission,
+            "decision": decision,
+            "resource_summary": request.resource_summary,
+        }
+        metadata = request.metadata if isinstance(request.metadata, dict) else {}
+        for key in ("agent", "caller", "session_id", "task_id"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value:
+                entry[key] = value
+        if request.parent_task_id and "task_id" not in entry:
+            entry["task_id"] = request.parent_task_id
+        if isinstance(request.request_id, str) and request.request_id:
+            entry["request_id"] = request.request_id
         return entry
 
     async def execute(self, request: ExecutionRequest) -> ToolResult:
         decision = decide(request, self.grants)
-        entry = {
-            "tool": request.tool_name,
-            "source": request.source,
-            "decision": decision.value,
-            "resource_summary": request.resource_summary,
-        }
+        entry = self._request_entry(
+            request,
+            event_type=(
+                "approval_required"
+                if decision is PermissionDecision.REQUIRE_APPROVAL
+                else "executed"
+            ),
+            permission=decision.value,
+            decision=decision.value,
+        )
         if decision is PermissionDecision.REQUIRE_APPROVAL:
             approval = self.approvals.create(request)
             entry["request_id"] = approval.request_id
-            self._record(entry)
+            entry["approval_request_id"] = approval.request_id
+            entry["status"] = "pending"
+            entry = self._record(entry)
             return ToolResult(
                 content=f"Approval required before executing {request.tool_name}.",
                 is_error=True,
@@ -61,7 +115,9 @@ class ExecutionGateway:
             result.metadata.setdefault("revision_id", revision.id)
         entry["is_error"] = result.is_error
         entry["status"] = "executed"
-        self._record(entry)
+        if result.is_error and isinstance(result.metadata.get("reason"), str):
+            entry["error_reason"] = result.metadata["reason"]
+        entry = self._record(entry)
         result.metadata.setdefault("audit", entry)
         return result
 
@@ -83,13 +139,19 @@ class ExecutionGateway:
         else:
             self.grants.grant_once(approval.execution.tool_name)
         self.approvals.resolve(request_id, approved=True)
-        self._record({
-            "tool": approval.execution.tool_name,
-            "source": approval.execution.source,
-            "request_id": request_id,
-            "decision": "approved",
-            "scope": ApprovalScope.PROJECT.value if project else ApprovalScope.ONCE.value,
-        })
+        entry = self._request_entry(
+            approval.execution,
+            event_type="approved",
+            permission=PermissionDecision.ALLOW.value,
+            decision="approved",
+        )
+        entry["request_id"] = request_id
+        entry["approval_request_id"] = request_id
+        entry["authorization_scope"] = (
+            ApprovalScope.PROJECT.value if project else ApprovalScope.ONCE.value
+        )
+        entry["status"] = "approved"
+        self._record(entry)
         return ToolResult("Approval granted; waiting execution will continue.")
 
     async def wait_for_approval(self, request_id: str) -> ToolResult:
@@ -103,15 +165,19 @@ class ExecutionGateway:
             result = await self.registry.execute(request.tool_name, request.input)
             if revision is not None and not result.is_error:
                 result.metadata.setdefault("revision_id", revision.id)
-            entry = {
-                "tool": request.tool_name,
-                "source": request.source,
-                "request_id": request_id,
-                "decision": "allow",
-                "status": "executed",
-                "is_error": result.is_error,
-            }
-            self._record(entry)
+            entry = self._request_entry(
+                request,
+                event_type="executed",
+                permission=PermissionDecision.ALLOW.value,
+                decision="allow",
+            )
+            entry["request_id"] = request_id
+            entry["approval_request_id"] = request_id
+            entry["status"] = "executed"
+            entry["is_error"] = result.is_error
+            if result.is_error and isinstance(result.metadata.get("reason"), str):
+                entry["error_reason"] = result.metadata["reason"]
+            entry = self._record(entry)
             result.metadata.setdefault("audit", entry)
             return result
 
@@ -120,14 +186,26 @@ class ExecutionGateway:
             ApprovalStatus.CANCELLED: "approval_cancelled",
             ApprovalStatus.TIMED_OUT: "approval_timed_out",
         }.get(approval.status, "approval_denied")
-        entry = {
-            "tool": request.tool_name,
-            "source": request.source,
-            "request_id": request_id,
-            "decision": "deny",
-            "reason": reason,
-        }
-        self._record(entry)
+        event_type = {
+            "approval_denied": "rejected",
+            "approval_cancelled": "cancelled",
+            "approval_timed_out": "timeout",
+        }.get(reason, "rejected")
+        entry = self._request_entry(
+            request,
+            event_type=event_type,
+            permission=PermissionDecision.DENY.value,
+            decision="deny",
+        )
+        entry["request_id"] = request_id
+        entry["approval_request_id"] = request_id
+        entry["reason"] = reason
+        entry["status"] = {
+            "rejected": "rejected",
+            "cancelled": "cancelled",
+            "timeout": "timed_out",
+        }.get(event_type, event_type)
+        entry = self._record(entry)
         return ToolResult(
             f"Approval was not granted for {request.tool_name}.",
             is_error=True,
